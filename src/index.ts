@@ -14,8 +14,25 @@ initKeyRotationCron();
 
 const app = express();
 
+const allowedOrigins = [
+  'http://localhost:5173',
+  'https://fsociety-shadow-scan-frontend.vercel.app',
+  process.env.FRONTEND_URL
+].filter(Boolean) as string[];
+
 const corsOptions = {
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  origin: (origin: string | undefined, callback: any) => {
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) return callback(null, true);
+    
+    // Check if origin is in our allowed list or is a Vercel preview URL
+    if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) {
+      callback(null, true);
+    } else {
+      console.warn(`CORS blocked request from origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-csrf-token', 'x-sudo-token'],
   credentials: true,
