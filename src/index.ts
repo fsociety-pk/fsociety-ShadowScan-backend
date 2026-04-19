@@ -36,6 +36,10 @@ import toolRoutes from './routes/toolRoutes';
 import adminRoutes from './routes/admin';
 
 // Basic Route
+app.get('/', (req, res) => {
+  res.send('<h1>Fsociety ShadowScan API</h1><p>Status: ONLINE</p><p>Use the frontend to access the dashboard.</p>');
+});
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', message: 'Fsociety ShadowScan API is running' });
 });
