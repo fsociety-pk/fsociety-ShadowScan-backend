@@ -1,0 +1,22 @@
+# Dependency directories
+node_modules/
+venv/
+
+# Build artifacts
+dist/
+
+# Environment variables
+.env
+.env.local
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# Uploads
+uploads/*
+!uploads/.gitkeep
+
+# OS specific
+.DS_Store
