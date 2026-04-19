@@ -81,7 +81,7 @@ export const getUserDetails = async (req: Request, res: Response) => {
 export const deleteUser = async (req: Request, res: Response) => {
   const { id } = req.params;
   
-  if (!mongoose.Types.ObjectId.isValid(id)) {
+  if (!mongoose.Types.ObjectId.isValid(id as string)) {
     return res.status(400).json({ success: false, message: 'Invalid User ID format' });
   }
 
@@ -230,7 +230,7 @@ export const toggleUserStatus = async (req: Request, res: Response) => {
   const { id } = req.params;
   const { isActive, reason } = req.body;
 
-  if (!mongoose.Types.ObjectId.isValid(id)) {
+  if (!mongoose.Types.ObjectId.isValid(id as string)) {
     return res.status(400).json({ success: false, message: 'Invalid User ID format' });
   }
 
