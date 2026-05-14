@@ -1,7 +1,14 @@
 import { Router } from 'express';
 import multer from 'multer';
 import path from 'path';
-import { emailLookup, usernameLookup, extractMetadata, phoneLookupPK } from '../controllers/toolController';
+import { 
+    emailLookup, 
+    usernameLookup, 
+    extractMetadata, 
+    phoneLookupPK, 
+    networkRecon, 
+    phoneLookupGlobal 
+} from '../controllers/toolController';
 import { protect } from '../middleware/authMiddleware';
 import { checkSettings } from '../middleware/checkSettings';
 
@@ -38,5 +45,11 @@ router.post('/extract-metadata', upload.single('file'), extractMetadata);
 
 // Pakistan Phone Intelligence
 router.post('/phone-lookup-pk', phoneLookupPK);
+
+// Global Phone Intelligence
+router.post('/phone-lookup-global', phoneLookupGlobal);
+
+// Network Recon Intelligence
+router.post('/network-recon', networkRecon);
 
 export default router;

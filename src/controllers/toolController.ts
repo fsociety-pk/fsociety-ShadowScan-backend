@@ -6,8 +6,9 @@ import path from 'path';
 import fs from 'fs';
 import { platforms, Platform } from '../config/platforms';
 import { generateUsernameVariations } from '../utils/usernameUtils';
-import { getRequestConfig, enforceDelay } from '../utils/requestManager';
+import { getRandomUA, getRequestConfig, enforceDelay } from '../utils/requestManager';
 import { logUserActivity } from '../utils/logActivity';
+import Finding from '../models/Finding';
 
 /**
  * Extract possible usernames from an email address (Enhanced)
@@ -46,6 +47,13 @@ const extractUsernames = (email: string): string[] => {
 /**
  * Detect email type
  */
+// Helper to find Python path (venv or system)
+const getPythonPath = (): string => {
+    const venvPath = path.join(__dirname, '../../venv/bin/python');
+    if (fs.existsSync(venvPath)) return venvPath;
+    return 'python3';
+};
+
 const getEmailProviderType = (email: string): 'corporate' | 'webmail' | 'disposable' => {
     const commonWebmail = ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com', 'me.com', 'aol.com'];
     const domain = email.split('@')[1].toLowerCase();
@@ -85,20 +93,28 @@ const probePlatformWithSignatures = async (username: string, platform: Platform)
 
     const axiosConfig = isSpecial ? getRequestConfig(platform.name) : {
         headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36',
+            'User-Agent': getRandomUA(),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5'
         },
-        timeout: 5000,
+        timeout: 8000,
         validateStatus: () => true
     };
 
     let response;
-    let retries = platform.name.toLowerCase() === 'github' ? 2 : 0;
+    let retries = 1;
 
     const performRequest = async (): Promise<any> => {
         try {
-            return await axios.get(url, axiosConfig);
+            const res = await axios.get(url, axiosConfig);
+            // If blocked (403/429), try one more time with a different UA
+            if ((res.status === 403 || res.status === 429) && retries > 0) {
+                retries--;
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                if (axiosConfig.headers) axiosConfig.headers['User-Agent'] = getRandomUA();
+                return performRequest();
+            }
+            return res;
         } catch (e: any) {
             if (retries > 0 && (!e.response || e.response.status >= 500)) {
                 retries--;
@@ -114,73 +130,27 @@ const probePlatformWithSignatures = async (username: string, platform: Platform)
         let html = response.data ? response.data.toString() : '';
         let status = response.status;
 
-        // Step 2: Handle LinkedIn status 999 (Rate Limited)
-        if (platform.name.toLowerCase() === 'linkedin' && status === 999) {
-            await new Promise(resolve => setTimeout(resolve, (Math.random() * 5000) + 5000)); // 5-10s wait
-            const retryConfig = getRequestConfig('linkedin'); // Rotates UA
-            response = await axios.get(url, retryConfig);
-            html = response.data ? response.data.toString() : '';
-            status = response.status;
-            
-            if (status === 999) {
-                return { status: 'unknown', url, message: 'LinkedIn is rate limiting, cannot verify', confidence: 0 };
+        // Trust Status 200 for major platforms
+        if (status === 200) {
+            // Check for soft 404s just in case
+            if (platform.not_found_signatures.some(sig => html.includes(sig))) {
+                return { status: 'not_found', url, confidence: 0.9 };
             }
-        }
-
-        // Step 3: Branching Logic - GitHub and LinkedIn use the new robust scoring system
-        if (isSpecial) {
-            const foundScore = calculateMatchPercentage(html, platform.found_signatures);
-            const notFoundScore = calculateMatchPercentage(html, platform.not_found_signatures);
-            const suspendedScore = calculateMatchPercentage(html, platform.suspended_signatures);
-            const restrictedScore = calculateMatchPercentage(html, platform.restricted_signatures || []);
-
-            // Special Part: GitHub 410 handling
-            if (platform.name.toLowerCase() === 'github' && (status === 410 || suspendedScore > 40)) {
-                return { status: 'suspended', url, confidence: 0.99 };
-            }
-
-            // LinkedIn Restricted detection
-            if (platform.name.toLowerCase() === 'linkedin' && restrictedScore > 40) {
-                return { status: 'restricted', url, message: 'Profile exists but is private or restricted', confidence: 0.85 };
-            }
-
-            // Standard status code overrides
-            if (status === 404 || notFoundScore > 70) {
-                return { status: 'not_found', url, confidence: 0.99 };
-            }
-
-            // Percentage based success
-            if (foundScore > 70 || (status === 200 && foundScore > 40)) {
-                const finalStatus = foundScore > 70 ? 'found' : 'possibly_found';
-                return { status: finalStatus, url, confidence: platform.confidence_weight, score: foundScore };
-            }
-
-            // Handle Ambiguous Status 200
-            if (status === 200 && foundScore < 20 && notFoundScore < 20) {
-                return { status: 'unknown', url, message: 'Ambiguous response (possible block)', confidence: 0.3 };
-            }
-
-            return { status: 'not_found', url, confidence: 0.5 };
-        } else {
-            // Priority 4: ORIGINAL BEHAVIOR for all other platforms
-            
-            // Check for Suspended (Original Exact Case Match)
             if (platform.suspended_signatures.some(sig => html.includes(sig))) {
-                return { status: 'suspended', url, confidence: platform.confidence_weight };
+                return { status: 'suspended', url, confidence: 0.9 };
             }
-
-            // Check for Not Found (Content Signatures & 404)
-            if (platform.not_found_signatures.some(sig => html.includes(sig)) || status === 404) {
-                return { status: 'not_found', url, confidence: 1.0 };
-            }
-
-            // Check for Found (Content Signatures & 200)
-            if (platform.found_signatures.some(sig => html.includes(sig)) || status === 200) {
-                return { status: 'found', url, confidence: platform.confidence_weight };
-            }
-
-            return { status: 'not_found', url, confidence: 0.5 };
+            // Otherwise, it's definitely found
+            return { status: 'found', url, confidence: platform.confidence_weight || 0.9 };
+        } else if (status === 404) {
+            return { status: 'not_found', url, confidence: 0.99 };
+        } else if (status === 403 || status === 429) {
+            // Blocked by platform, return unknown
+            return { status: 'unknown', url, message: 'Blocked by rate limiting/WAF', confidence: 0 };
+        } else if (status === 410) {
+            return { status: 'suspended', url, confidence: 0.99 };
         }
+        
+        return { status: 'not_found', url, confidence: 0.5 };
     } catch (e) {
         return { status: 'error', url, message: 'Connection failed', confidence: 0 };
     }
@@ -236,7 +206,7 @@ const fetchWithRetry = async (fn: () => Promise<any>, retries = 2, delay = 1000)
  * Hunter.io: Email Verification & Corporate Data
  */
 const verifyEmailHunter = async (email: string) => {
-    const API_KEY = process.env.HUNTER_API_KEY;
+    const API_KEY = process.env.HUNTER_API_KEY || process.env.EMAILVALIDATOR_API_KEY;
     if (!API_KEY) return null;
     try {
         const res = await fetchWithRetry(() => axios.get(`https://api.hunter.io/v2/email-verifier?email=${encodeURIComponent(email)}&api_key=${API_KEY}`, { timeout: 8000 }));
@@ -350,7 +320,7 @@ const aggregateResults = (raw: any) => {
  * Email Lookup OSINT Controller - PROFILE DISCOVERY
  */
 export const emailLookup = async (req: Request, res: Response): Promise<void> => {
-    const { email } = req.body;
+    const { email, caseId } = req.body;
 
     if (!email || !email.includes('@')) {
         res.status(400).json({ message: 'Valid email required' });
@@ -394,13 +364,12 @@ export const emailLookup = async (req: Request, res: Response): Promise<void> =>
         rawResults.fullcontact = fullcontact;
         rawResults.gravatar = gravatar;
 
-        // 2. Parallel Social Probing
-        const platforms = ['instagram', 'tiktok', 'github', 'facebook', 'x', 'linkedin', 'reddit', 'stackoverflow', 'pinterest'];
+        // 2. Parallel Social Probing (Enhanced to use ALL platforms)
         const discoveryTasks: Promise<any>[] = [];
 
         platforms.forEach(platform => {
             targetUsernames.forEach(username => {
-                discoveryTasks.push(probePlatform(username, platform).then(res => ({ ...res, platform, username })));
+                discoveryTasks.push(probePlatformWithSignatures(username, platform).then(res => ({ ...res, platform: platform.name, username })));
             });
         });
 
@@ -408,13 +377,13 @@ export const emailLookup = async (req: Request, res: Response): Promise<void> =>
         
         const foundPlatforms = new Set();
         discoveryResults.forEach(res => {
-            if (res.found && !foundPlatforms.has(res.platform)) {
+            if ((res.status === 'found' || res.status === 'suspended') && !foundPlatforms.has(res.platform)) {
                 foundPlatforms.add(res.platform);
-                const platformName = res.platform.charAt(0).toUpperCase() + res.platform.slice(1);
                 rawResults.discoveredLinks.push({
-                    platform: platformName,
+                    platform: res.platform,
                     url: res.url,
                     username: res.username,
+                    status: res.status,
                     confidence: res.username === mainUsername ? 'High' : 'Possible'
                 });
             }
@@ -445,12 +414,35 @@ export const emailLookup = async (req: Request, res: Response): Promise<void> =>
         // LOGGING ACTION
         logUserActivity(req, 'email_lookup', 'Email Intelligence', { target: email, foundSources: aggregated.profile.sources });
 
+        // 5. Save Finding if caseId provided
+        let findingId = null;
+        if (caseId) {
+            try {
+                const finding = new Finding({
+                    caseId,
+                    findingType: 'email_lookup',
+                    source: 'Multi-Source (Hunter, RocketReach, Clearbit, FullContact, HIBP)',
+                    email,
+                    data: rawResults,
+                    confidence: Math.min(100, aggregated.profile.sources.length * 20), // Confidence based on sources found
+                    isVerified: !!aggregated.profile.verified,
+                    tags: ['email-lookup', aggregated.profile.type || 'webmail'],
+                });
+                const saved = await finding.save();
+                findingId = saved._id;
+            } catch (findingError) {
+                console.error('Error saving finding:', findingError);
+                // Don't fail the request, just log the error
+            }
+        }
+
         res.json({
             email,
             status: aggregated.profile.sources.length > 0 ? 'success' : 'partial',
             ...aggregated,
             breaches: rawResults.breaches,
-            last_updated: new Date().toISOString()
+            last_updated: new Date().toISOString(),
+            findingId, // Return Finding ID for frontend reference
         });
 
     } catch (error) {
@@ -463,7 +455,7 @@ export const emailLookup = async (req: Request, res: Response): Promise<void> =>
  * Username Intelligence Controller
  */
 export const usernameLookup = async (req: Request, res: Response): Promise<void> => {
-    const { username } = req.body;
+    const { username, caseId } = req.body;
 
     if (!username) {
         res.status(400).json({ message: 'Target username required' });
@@ -510,6 +502,30 @@ export const usernameLookup = async (req: Request, res: Response): Promise<void>
             suspended: suspendedCount
         });
 
+        // Save findings if caseId provided
+        let findingIds: string[] = [];
+        if (caseId) {
+            try {
+                const foundMatches = results.filter(r => r.status === 'found' || r.status === 'suspended');
+                for (const match of foundMatches) {
+                    const finding = new Finding({
+                        caseId,
+                        findingType: 'username_search',
+                        source: match.platform,
+                        username: match.username,
+                        data: match,
+                        confidence: match.status === 'found' ? 95 : 70,
+                        isVerified: match.status === 'found',
+                        tags: ['username-search', match.platform.toLowerCase()],
+                    });
+                    const saved = await finding.save();
+                    findingIds.push(saved._id.toString());
+                }
+            } catch (findingError) {
+                console.error('Error saving username findings:', findingError);
+            }
+        }
+
         res.json({
             target: username,
             timestamp: new Date().toISOString(),
@@ -518,7 +534,8 @@ export const usernameLookup = async (req: Request, res: Response): Promise<void>
                 total_scanned: platforms.length,
                 found: foundCount,
                 suspended: suspendedCount
-            }
+            },
+            findingIds, // Return Finding IDs for frontend reference
         });
 
     } catch (error) {
@@ -538,7 +555,8 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
     }
 
     const { filename, path: filePath, size, mimetype } = req.file;
-    const pythonPath = path.join(__dirname, '../../venv/bin/python');
+    const { caseId } = req.body;
+    const pythonPath = getPythonPath();
     const scriptPath = path.join(__dirname, '../scripts/metadata_engine.py');
 
     console.log(`[METADATA_OSINT] Received upload: ${filename} (${mimetype}, ${size} bytes)`);
@@ -555,6 +573,7 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
 
     try {
         const startTime = Date.now();
+        console.log(`[METADATA_OSINT] Spawning process: ${pythonPath} ${scriptPath}`);
         const pythonProcess = spawn(pythonPath, [scriptPath, filePath]);
         
         let outputData = '';
@@ -584,7 +603,7 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
             errorData += data.toString();
         });
 
-        pythonProcess.on('close', (code) => {
+        pythonProcess.on('close', async (code) => {
             if (isFinished) return;
             isFinished = true;
             clearTimeout(timeout);
@@ -614,7 +633,27 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
                     processingTimeMs: extractionTime
                 });
 
-                res.json(result);
+                // Save findings if caseId provided
+                let findingId = null;
+                if (caseId) {
+                    try {
+                        const finding = new Finding({
+                            caseId,
+                            findingType: 'metadata',
+                            source: 'Metadata Forensic Engine',
+                            data: result,
+                            confidence: 95, // Metadata is usually accurate
+                            isVerified: true,
+                            tags: ['metadata', mimetype.split('/')[0] || 'file'],
+                        });
+                        const saved = await finding.save();
+                        findingId = saved._id;
+                    } catch (findingError) {
+                        console.error('Error saving metadata finding:', findingError);
+                    }
+                }
+
+                res.json({ ...result, findingId });
             } catch (e) {
                 console.error(`[METADATA_OSINT] Invalid JSON from engine: ${outputData}`);
                 res.status(500).json({ 
@@ -637,7 +676,7 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
  * Refactored for Step 3 - Robust Process Management
  */
 export const phoneLookupPK = async (req: Request, res: Response): Promise<void> => {
-    const { phone } = req.body;
+    const { phone, caseId } = req.body;
     const startTime = Date.now();
 
     // Part E: Logging Request
@@ -648,7 +687,7 @@ export const phoneLookupPK = async (req: Request, res: Response): Promise<void> 
         return;
     }
 
-    const pythonPath = path.join(__dirname, '../../venv/bin/python');
+    const pythonPath = getPythonPath();
     const scriptPath = path.join(__dirname, '../scripts/phone_engine_pk.py');
 
     try {
@@ -683,7 +722,7 @@ export const phoneLookupPK = async (req: Request, res: Response): Promise<void> 
             errorData += data.toString();
         });
 
-        pythonProcess.on('close', (code) => {
+        pythonProcess.on('close', async (code) => {
             processFinished = true;
             clearTimeout(timeoutWatchdog);
 
@@ -717,8 +756,29 @@ export const phoneLookupPK = async (req: Request, res: Response): Promise<void> 
                     processingTimeMs: duration
                 });
 
+                // Save findings if caseId provided
+                let findingId = null;
+                if (caseId) {
+                    try {
+                        const finding = new Finding({
+                            caseId,
+                            findingType: 'phone_lookup',
+                            source: 'Pakistan Telephony Engine',
+                            phone,
+                            data: result,
+                            confidence: result.operator ? 85 : 60,
+                            isVerified: !!result.operator,
+                            tags: ['phone-lookup', 'pakistan'],
+                        });
+                        const saved = await finding.save();
+                        findingId = saved._id;
+                    } catch (findingError) {
+                        console.error('Error saving phone finding:', findingError);
+                    }
+                }
+
                 if (!res.headersSent) {
-                    res.json(result);
+                    res.json({ ...result, findingId });
                 }
             } catch (e) {
                 // Part C: Error Handling (Invalid JSON)
@@ -740,5 +800,188 @@ export const phoneLookupPK = async (req: Request, res: Response): Promise<void> 
         if (!res.headersSent) {
             res.status(500).json({ status: 'error', message: 'Internal server error' });
         }
+    }
+};
+
+/**
+ * Network Recon Intelligence (Shodan, VirusTotal, AbuseIPDB, Censys)
+ */
+export const networkRecon = async (req: Request, res: Response): Promise<void> => {
+    const { target, caseId } = req.body; 
+
+    if (!target) {
+        res.status(400).json({ message: 'Target (IP or Domain) required' });
+        return;
+    }
+
+    try {
+        const results: any = {
+            target,
+            shodan: null,
+            virustotal: null,
+            abuseipdb: null,
+            censys: null,
+            timestamp: new Date()
+        };
+
+        const SHODAN_KEY = process.env.SHODAN_API_KEY;
+        if (SHODAN_KEY) {
+            try {
+                const shodanRes = await axios.get(`https://api.shodan.io/shodan/host/${target}?key=${SHODAN_KEY}`, { timeout: 5000 });
+                results.shodan = shodanRes.data;
+            } catch (e) { console.error('Shodan error:', target); }
+        }
+
+        const VT_KEY = process.env.VIRUSTOTAL_API_KEY;
+        if (VT_KEY) {
+            try {
+                const vtRes = await axios.get(`https://www.virustotal.com/api/v3/ip_addresses/${target}`, {
+                    headers: { 'x-apikey': VT_KEY },
+                    timeout: 5000
+                });
+                results.virustotal = vtRes.data;
+            } catch (e) {
+                try {
+                    const vtDomainRes = await axios.get(`https://www.virustotal.com/api/v3/domains/${target}`, {
+                        headers: { 'x-apikey': VT_KEY },
+                        timeout: 5000
+                    });
+                    results.virustotal = vtDomainRes.data;
+                } catch (err) { console.error('VT error:', target); }
+            }
+        }
+
+        const ABUSE_KEY = process.env.ABUSEIPDB_API_KEY;
+        if (ABUSE_KEY) {
+            try {
+                const abuseRes = await axios.get(`https://api.abuseipdb.com/api/v2/check`, {
+                    params: { ipAddress: target, maxAgeInDays: 90 },
+                    headers: { 'Key': ABUSE_KEY, 'Accept': 'application/json' },
+                    timeout: 5000
+                });
+                results.abuseipdb = abuseRes.data;
+            } catch (e) { console.error('AbuseIPDB error:', target); }
+        }
+
+        const CENSYS_ID = process.env.CENSYS_API_ID;
+        const CENSYS_SECRET = process.env.CENSYS_API_SECRET; 
+        if (CENSYS_ID && CENSYS_SECRET) {
+            try {
+                const auth = Buffer.from(`${CENSYS_ID}:${CENSYS_SECRET}`).toString('base64');
+                const censysRes = await axios.get(`https://search.censys.io/api/v2/hosts/${target}`, {
+                    headers: { 'Authorization': `Basic ${auth}` },
+                    timeout: 5000
+                });
+                results.censys = censysRes.data;
+            } catch (e) { console.error('Censys error:', target); }
+        }
+
+        logUserActivity(req, 'network_recon', 'Network Intelligence', { target });
+
+        if (caseId) {
+            try {
+                const finding = new Finding({
+                    caseId,
+                    findingType: 'network_recon',
+                    source: 'Multi-Source (Shodan, VT, AbuseIPDB, Censys)',
+                    data: results,
+                    confidence: 90,
+                    isVerified: true,
+                    tags: ['network', 'recon'],
+                });
+                await finding.save();
+            } catch (fError) { console.error('Error saving network finding'); }
+        }
+
+        res.json(results);
+    } catch (error) {
+        console.error('Network recon error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+};
+
+/**
+ * Global Phone Lookup (Twilio)
+ */
+export const phoneLookupGlobal = async (req: Request, res: Response): Promise<void> => {
+    const { phone, caseId } = req.body;
+    const SID = process.env.TWILIO_ACCOUNT_SID;
+    const TOKEN = process.env.TWILIO_AUTH_TOKEN;
+
+    if (!phone) {
+        res.status(400).json({ message: 'Phone number required' });
+        return;
+    }
+
+    if (!SID || !TOKEN) {
+        res.status(500).json({ message: 'Twilio credentials not configured' });
+        return;
+    }
+
+    try {
+        const auth = Buffer.from(`${SID}:${TOKEN}`).toString('base64');
+        const response = await axios.get(`https://lookups.twilio.com/v2/PhoneNumbers/${phone}?Fields=caller_name,sim_swap,line_type_intelligence`, {
+            headers: { 'Authorization': `Basic ${auth}` },
+            timeout: 8000
+        });
+
+        const result = response.data;
+        logUserActivity(req, 'phone_lookup_global', 'Global Phone Intelligence', { phone });
+
+        if (caseId) {
+            try {
+                const finding = new Finding({
+                    caseId,
+                    findingType: 'phone_lookup',
+                    source: 'Twilio Global Lookup',
+                    phone,
+                    data: result,
+                    confidence: 95,
+                    isVerified: true,
+                    tags: ['phone', 'global'],
+                });
+                await finding.save();
+            } catch (fError) { console.error('Error saving phone finding'); }
+        }
+
+        res.json(result);
+    } catch (error: any) {
+        console.error('Twilio lookup error:', error.response?.data || error.message);
+        res.status(500).json({ message: 'Twilio lookup failed', error: error.response?.data });
+    }
+};
+
+/**
+ * Pastebin Search (Leaked Data)
+ */
+export const pasteSearch = async (req: Request, res: Response): Promise<void> => {
+    const { query, caseId } = req.body;
+    const API_KEY = process.env.PASTEBIN_API_KEY;
+
+    if (!query) {
+        res.status(400).json({ message: 'Search query required' });
+        return;
+    }
+
+    try {
+        // Note: Pastebin API often requires scraping or Pro keys for full search.
+        // This is a simulated/proxy implementation using common scrapers or their API if allowed.
+        const results = {
+            query,
+            matches: [],
+            timestamp: new Date()
+        };
+
+        // If a real scraping API or search API is available, use it here.
+        // For demonstration with provided key:
+        if (API_KEY) {
+             // Implementation depends on Pastebin API type (Scraping vs Search)
+             // Here we log the attempt
+             console.log(`Searching Pastebin for: ${query}`);
+        }
+
+        res.json(results);
+    } catch (error) {
+        res.status(500).json({ message: 'Paste search failed' });
     }
 };

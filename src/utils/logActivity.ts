@@ -3,7 +3,7 @@ import AdminLog from '../models/AdminLog';
 import User from '../models/User';
 import SystemMetrics from '../models/SystemMetrics';
 
-type ActionType = 'email_lookup' | 'username_scan' | 'phone_lookup' | 'metadata_extraction';
+type ActionType = 'email_lookup' | 'username_scan' | 'phone_lookup' | 'metadata_extraction' | 'sherlock_search' | 'exiftool_metadata' | 'whois_lookup' | 'theharvester_enum' | 'nmap_scan' | 'network_recon' | 'phone_lookup_global' | 'social_media_finder' | 'intelligence_report_generated';
 
 /**
  * Logs user activity for OSINT tools without blocking request execution.
@@ -65,5 +65,52 @@ export const logUserActivity = async (
   } catch (error) {
     // Non-blocking catch: just print the error and let the parent process continue safely.
     console.error(`[logActivity] Failed to log activity or update metrics for action ${action}:`, error);
+  }
+};
+
+/**
+ * Alternative logging function that works with userId directly
+ */
+export const logUserActivityDirect = async (
+  userId: string,
+  action: ActionType,
+  metadata: any
+) => {
+  try {
+    if (!userId) {
+      console.warn(`[logActivity] No userId provided for action: ${action}`);
+      return;
+    }
+
+    // Create the Audit Log Entry
+    await AdminLog.create({
+      userId,
+      action,
+      toolName: 'OSINT',
+      details: metadata,
+      ipAddress: 'system',
+      status: 'success'
+    });
+
+    // Increment User Total Scans
+    await User.findByIdAndUpdate(userId, { $inc: { totalScans: 1 } });
+
+    // Update Daily System Metrics
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    await SystemMetrics.findOneAndUpdate(
+      { date: today },
+      {
+        $inc: {
+          totalScans: 1,
+          'toolUsageBreakdown.other': 1
+        }
+      },
+      { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
+    );
+
+  } catch (error) {
+    console.error(`[logActivity] Failed to log activity for action ${action}:`, error);
   }
 };

@@ -189,5 +189,77 @@ export const platforms: Platform[] = [
     suspended_signatures: [],
     restricted_signatures: [],
     confidence_weight: 0.85
+  },
+  {
+    name: "Twitch",
+    url_pattern: "https://www.twitch.tv/{username}",
+    not_found_signatures: ["content is unavailable", "404"],
+    found_signatures: ["offline", "streamer", "tw-avatar"],
+    suspended_signatures: [],
+    restricted_signatures: [],
+    confidence_weight: 0.90
+  },
+  {
+    name: "Medium",
+    url_pattern: "https://medium.com/@{username}",
+    not_found_signatures: ["404", "page not found"],
+    found_signatures: ["About", "Followers", "Follow"],
+    suspended_signatures: [],
+    restricted_signatures: [],
+    confidence_weight: 0.88
+  },
+  {
+    name: "Snapchat",
+    url_pattern: "https://www.snapchat.com/add/{username}",
+    not_found_signatures: ["Snapchat is a fast and fun way"],
+    found_signatures: ["Add on Snapchat", "Bitmoji"],
+    suspended_signatures: [],
+    restricted_signatures: [],
+    confidence_weight: 0.82
+  },
+  {
+    name: "Spotify",
+    url_pattern: "https://open.spotify.com/user/{username}",
+    not_found_signatures: ["Page not found", "404"],
+    found_signatures: ["Spotify", "Followers", "Following"],
+    suspended_signatures: [],
+    restricted_signatures: [],
+    confidence_weight: 0.85
+  },
+  {
+    name: "Behance",
+    url_pattern: "https://www.behance.net/{username}",
+    not_found_signatures: ["404", "Oops"],
+    found_signatures: ["Project Views", "Appreciations"],
+    suspended_signatures: [],
+    restricted_signatures: [],
+    confidence_weight: 0.92
+  },
+  {
+    name: "Vimeo",
+    url_pattern: "https://vimeo.com/{username}",
+    not_found_signatures: ["404", "not found"],
+    found_signatures: ["Videos", "Follow", "Vimeo"],
+    suspended_signatures: [],
+    restricted_signatures: [],
+    confidence_weight: 0.90
+  },
+  {
+    name: "SoundCloud",
+    url_pattern: "https://soundcloud.com/{username}",
+    not_found_signatures: ["404", "Oops"],
+    found_signatures: ["Tracks", "Followers"],
+    suspended_signatures: [],
+    restricted_signatures: [],
+    confidence_weight: 0.91
+  },
+  {
+    name: "Flickr",
+    url_pattern: "https://www.flickr.com/photos/{username}",
+    not_found_signatures: ["404", "not found"],
+    found_signatures: ["Photostream", "Follow"],
+    suspended_signatures: [],
+    restricted_signatures: [],
+    confidence_weight: 0.89
   }
 ];

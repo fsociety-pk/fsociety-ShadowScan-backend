@@ -25,8 +25,8 @@ const corsOptions = {
     // Allow requests with no origin (like mobile apps or curl)
     if (!origin) return callback(null, true);
     
-    // Check if origin is in our allowed list or is a Vercel preview URL
-    if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) {
+    // Check if origin is in our allowed list, is a Vercel preview URL, or is a localhost port
+    if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app') || origin.startsWith('http://localhost:')) {
       callback(null, true);
     } else {
       console.warn(`CORS blocked request from origin: ${origin}`);
@@ -50,7 +50,13 @@ import caseRoutes from './routes/caseRoutes';
 import searchRoutes from './routes/searchRoutes';
 import userRoutes from './routes/userRoutes';
 import toolRoutes from './routes/toolRoutes';
+import kaliToolsRoutes from './routes/kaliToolsRoutes';
+import socialMediaFinderRoutes from './routes/socialMediaFinderRoutes';
+import reportRoutes from './routes/reportRoutes';
+import intelligenceReportRoutes from './routes/intelligenceReportRoutes';
 import adminRoutes from './routes/admin';
+import osintAnalystRoutes from './routes/osintAnalystRoutes';
+import chatRoutes from './routes/chatRoutes';
 
 // Basic Route
 app.get('/', (req, res) => {
@@ -67,7 +73,13 @@ app.use('/api/cases', caseRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/tools', toolRoutes);
+app.use('/api/kali-tools', kaliToolsRoutes);
+app.use('/api/social-media', socialMediaFinderRoutes);
+app.use('/api/reports', reportRoutes);
+app.use('/api/intelligence', intelligenceReportRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/osint-analyst', osintAnalystRoutes);
+app.use('/api/chat', chatRoutes);
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
