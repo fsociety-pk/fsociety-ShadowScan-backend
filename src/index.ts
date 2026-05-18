@@ -29,21 +29,28 @@ const allowedOrigins = [
   ...envFrontendOrigins
 ].filter(Boolean) as string[];
 
+// Helper to normalize origins (strips protocols and trailing slashes) for reliable matching
+const normalizeOrigin = (url: string): string => {
+  return url.replace(/^https?:\/\//, '').replace(/\/$/, '').toLowerCase();
+};
+
 const corsOptions = {
   origin: (origin: string | undefined, callback: any) => {
-    // Allow requests with no origin (like mobile apps or curl)
+    // Allow requests with no origin (like mobile apps, postman, or curl)
     if (!origin) return callback(null, true);
     
-    // Check if origin is in our allowed list, is a Vercel preview URL, or is a localhost port
-    if (
-      allowedOrigins.includes(origin) ||
-      origin.endsWith('.vercel.app') ||
-      origin.startsWith('http://localhost:') ||
-      origin.startsWith('https://localhost:')
-    ) {
+    const normalizedOrigin = normalizeOrigin(origin);
+    
+    // Check if the normalized origin is allowed
+    const isAllowed = allowedOrigins.some(allowed => normalizeOrigin(allowed) === normalizedOrigin) ||
+                      normalizedOrigin.endsWith('.vercel.app') ||
+                      normalizedOrigin.startsWith('localhost:') ||
+                      normalizedOrigin.startsWith('127.0.0.1:');
+    
+    if (isAllowed) {
       callback(null, true);
     } else {
-      console.warn(`CORS blocked request from origin: ${origin}`);
+      console.warn(`[CORS] Blocked request from origin: ${origin} (Normalized: ${normalizedOrigin})`);
       callback(new Error('Not allowed by CORS'));
     }
   },
