@@ -12,6 +12,44 @@ interface AuthRequest extends Request {
   user?: any;
 }
 
+type ReportTemplate = 'fbi' | 'corporate';
+type RiskLevel = 'Low' | 'Medium' | 'High' | 'Critical';
+
+interface ExtractedEntity {
+  type: 'email' | 'phone' | 'username' | 'domain' | 'ip' | 'person' | 'organization' | 'location';
+  value: string;
+  confidence: number;
+  source: string;
+}
+
+interface GraphNode {
+  id: string;
+  label: string;
+  type: ExtractedEntity['type'] | 'target';
+  color: string;
+}
+
+interface GraphEdge {
+  source: string;
+  target: string;
+  relation: string;
+  strength: 'weak' | 'medium' | 'strong';
+}
+
+interface VisualReportPayload {
+  target: string;
+  summary: string;
+  riskLevel: RiskLevel;
+  confidenceScore: number;
+  tags: string[];
+  entitiesByType: Record<string, string[]>;
+  highlightedFindings: string[];
+  relationshipGraph: {
+    nodes: GraphNode[];
+    edges: GraphEdge[];
+  };
+}
+
 // Helper function to format findings for AI
 const formatFindingsForAI = (findings: any[]) => {
   const grouped = findings.reduce((acc: any, finding: any) => {
@@ -37,10 +75,273 @@ const formatFindingsForAI = (findings: any[]) => {
   return formatted;
 };
 
+const normalizeRiskLevel = (raw: string | undefined): RiskLevel => {
+  const value = (raw || '').toLowerCase();
+  if (value.includes('critical')) return 'Critical';
+  if (value.includes('high')) return 'High';
+  if (value.includes('medium')) return 'Medium';
+  return 'Low';
+};
+
+const confidenceToRisk = (score: number): RiskLevel => {
+  if (score >= 85) return 'Critical';
+  if (score >= 65) return 'High';
+  if (score >= 40) return 'Medium';
+  return 'Low';
+};
+
+const toCleanLines = (text: string) =>
+  text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+const parseEntitiesFromText = (rawText: string, source: string): ExtractedEntity[] => {
+  const entities: ExtractedEntity[] = [];
+  const lines = toCleanLines(rawText);
+
+  const emailRegex = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+  const phoneRegex = /\+?\d[\d\s\-()]{7,}\d/g;
+  const domainRegex = /\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b/gi;
+  const ipRegex = /\b(?:\d{1,3}\.){3}\d{1,3}\b/g;
+  const usernameRegex = /(?:^|\s|[:(])@?([a-z0-9._-]{3,32})(?=$|\s|[),])/gi;
+
+  const addEntity = (type: ExtractedEntity['type'], value: string, confidence: number) => {
+    const cleaned = value.trim();
+    if (!cleaned) return;
+    entities.push({ type, value: cleaned, confidence, source });
+  };
+
+  for (const match of rawText.match(emailRegex) || []) addEntity('email', match, 90);
+  for (const match of rawText.match(phoneRegex) || []) addEntity('phone', match, 84);
+  for (const match of rawText.match(ipRegex) || []) addEntity('ip', match, 82);
+  for (const match of rawText.match(domainRegex) || []) {
+    if (!match.includes('@')) addEntity('domain', match, 80);
+  }
+  for (const match of rawText.matchAll(usernameRegex)) {
+    const value = match[1];
+    if (value && !value.includes('.')) addEntity('username', value, 76);
+  }
+
+  for (const line of lines) {
+    const [labelRaw, ...rest] = line.split(':');
+    if (!rest.length) continue;
+    const label = labelRaw.trim().toLowerCase();
+    const value = rest.join(':').trim();
+    if (!value) continue;
+
+    if (['name', 'target', 'friend', 'alias', 'person'].includes(label)) addEntity('person', value, 78);
+    if (['organization', 'org', 'employer', 'company'].includes(label)) addEntity('organization', value, 75);
+    if (['location', 'city', 'address'].includes(label)) addEntity('location', value, 74);
+  }
+
+  const dedupe = new Map<string, ExtractedEntity>();
+  for (const entity of entities) {
+    const key = `${entity.type}::${entity.value.toLowerCase()}`;
+    const existing = dedupe.get(key);
+    if (!existing || existing.confidence < entity.confidence) dedupe.set(key, entity);
+  }
+  return Array.from(dedupe.values());
+};
+
+const buildSyntheticFindingsFromCase = (caseDoc: any): any[] => {
+  const clues = Array.isArray(caseDoc.clues) ? caseDoc.clues : [];
+  const targetProfile = caseDoc.targetProfile || {};
+  const profileText = [
+    targetProfile.name ? `name: ${targetProfile.name}` : '',
+    targetProfile.email ? `email: ${targetProfile.email}` : '',
+    targetProfile.phone ? `phone: ${targetProfile.phone}` : '',
+    targetProfile.organization ? `organization: ${targetProfile.organization}` : '',
+    targetProfile.location ? `location: ${targetProfile.location}` : '',
+    targetProfile.socialMedia ? `username: ${targetProfile.socialMedia}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const rawCorpus = [caseDoc.description || '', ...clues, caseDoc.notes || '', profileText].filter(Boolean).join('\n');
+  const entities = parseEntitiesFromText(rawCorpus, 'Case Dossier');
+  const findings: any[] = [];
+
+  entities.forEach((entity, idx) => {
+    findings.push({
+      findingType: 'other',
+      source: entity.source,
+      confidence: entity.confidence,
+      email: entity.type === 'email' ? entity.value : undefined,
+      username: entity.type === 'username' ? entity.value : undefined,
+      phone: entity.type === 'phone' ? entity.value : undefined,
+      domain: entity.type === 'domain' ? entity.value : undefined,
+      data: {
+        extractedType: entity.type,
+        extractedValue: entity.value,
+        clueIndex: idx + 1,
+      },
+    });
+  });
+
+  if (!findings.length && rawCorpus.trim()) {
+    findings.push({
+      findingType: 'other',
+      source: 'Case Dossier',
+      confidence: 70,
+      data: { raw: rawCorpus.slice(0, 1000) },
+    });
+  }
+
+  return findings;
+};
+
+const extractEntitiesFromFindings = (findings: any[]): ExtractedEntity[] => {
+  const extracted: ExtractedEntity[] = [];
+  findings.forEach((f) => {
+    if (f.email) extracted.push({ type: 'email', value: f.email, confidence: f.confidence || 75, source: f.source || 'Unknown' });
+    if (f.phone) extracted.push({ type: 'phone', value: f.phone, confidence: f.confidence || 75, source: f.source || 'Unknown' });
+    if (f.username) extracted.push({ type: 'username', value: f.username, confidence: f.confidence || 75, source: f.source || 'Unknown' });
+    if (f.domain) extracted.push({ type: 'domain', value: f.domain, confidence: f.confidence || 75, source: f.source || 'Unknown' });
+    if (f.data?.ip) extracted.push({ type: 'ip', value: f.data.ip, confidence: f.confidence || 70, source: f.source || 'Unknown' });
+    if (f.data?.name) extracted.push({ type: 'person', value: f.data.name, confidence: f.confidence || 72, source: f.source || 'Unknown' });
+    if (f.data?.organization) extracted.push({ type: 'organization', value: f.data.organization, confidence: f.confidence || 70, source: f.source || 'Unknown' });
+    if (f.data?.location) extracted.push({ type: 'location', value: f.data.location, confidence: f.confidence || 68, source: f.source || 'Unknown' });
+  });
+
+  const dedupe = new Map<string, ExtractedEntity>();
+  extracted.forEach((entity) => {
+    const key = `${entity.type}::${String(entity.value).toLowerCase()}`;
+    const existing = dedupe.get(key);
+    if (!existing || entity.confidence > existing.confidence) dedupe.set(key, entity);
+  });
+  return Array.from(dedupe.values());
+};
+
+const getEntityColor = (type: ExtractedEntity['type'] | 'target') => {
+  const palette: Record<string, string> = {
+    target: '#0ea5e9',
+    person: '#8b5cf6',
+    email: '#ef4444',
+    phone: '#f59e0b',
+    username: '#6366f1',
+    domain: '#10b981',
+    ip: '#06b6d4',
+    organization: '#14b8a6',
+    location: '#fb923c',
+  };
+  return palette[type] || '#64748b';
+};
+
+const buildGraph = (targetLabel: string, entities: ExtractedEntity[]) => {
+  const nodes: GraphNode[] = [{ id: 'target', label: targetLabel, type: 'target', color: getEntityColor('target') }];
+  const edges: GraphEdge[] = [];
+
+  entities.slice(0, 24).forEach((entity, idx) => {
+    const id = `n-${idx}`;
+    nodes.push({
+      id,
+      label: entity.value,
+      type: entity.type,
+      color: getEntityColor(entity.type),
+    });
+
+    const strength: GraphEdge['strength'] =
+      entity.confidence >= 85 ? 'strong' : entity.confidence >= 72 ? 'medium' : 'weak';
+    edges.push({
+      source: 'target',
+      target: id,
+      relation: entity.type.toUpperCase(),
+      strength,
+    });
+  });
+
+  return { nodes, edges };
+};
+
+const buildVisualReport = (
+  caseDoc: any,
+  entities: ExtractedEntity[],
+  riskLevel: RiskLevel,
+  confidenceScore: number,
+  findingsCount: number
+): VisualReportPayload => {
+  const entitiesByType: Record<string, string[]> = {};
+  entities.forEach((entity) => {
+    if (!entitiesByType[entity.type]) entitiesByType[entity.type] = [];
+    entitiesByType[entity.type].push(entity.value);
+  });
+
+  const tags = [
+    caseDoc.category,
+    caseDoc.priority,
+    caseDoc.status,
+    `Findings:${findingsCount}`,
+    ...Object.entries(entitiesByType).map(([type, vals]) => `${type}:${vals.length}`),
+  ].filter(Boolean) as string[];
+
+  const highlightedFindings = [
+    ...Object.entries(entitiesByType).slice(0, 6).map(
+      ([type, vals]) => `${vals.length} ${type}${vals.length > 1 ? 's' : ''} linked to this case`
+    ),
+    ...(caseDoc.clues || []).slice(0, 3).map((clue: string) => `Clue: ${clue}`),
+  ].slice(0, 8);
+
+  const graph = buildGraph(caseDoc.title || 'Target', entities);
+
+  return {
+    target: caseDoc.title || 'Target',
+    summary: `${findingsCount} intelligence artifacts processed across ${Object.keys(entitiesByType).length} entity classes.`,
+    riskLevel,
+    confidenceScore,
+    tags,
+    entitiesByType,
+    highlightedFindings,
+    relationshipGraph: graph,
+  };
+};
+
+const buildFallbackMarkdown = (
+  caseDoc: any,
+  template: ReportTemplate,
+  findingsCount: number,
+  riskLevel: RiskLevel,
+  visual: VisualReportPayload
+) => {
+  const sectionTitle = template === 'fbi' ? 'Executive Summary' : 'Overview';
+  const entityLines = Object.entries(visual.entitiesByType)
+    .map(([type, values]) => `- **${type.toUpperCase()}**: ${values.slice(0, 8).join(', ')}`)
+    .join('\n');
+
+  const relationLines = visual.relationshipGraph.edges
+    .slice(0, 12)
+    .map((edge) => {
+      const source = visual.relationshipGraph.nodes.find((n) => n.id === edge.source)?.label || edge.source;
+      const target = visual.relationshipGraph.nodes.find((n) => n.id === edge.target)?.label || edge.target;
+      return `- ${source} → ${target} (${edge.relation}, ${edge.strength})`;
+    })
+    .join('\n');
+
+  return `# ${template === 'fbi' ? 'Law Enforcement' : 'Corporate'} Intelligence Report
+
+## ${sectionTitle}
+Case **${caseDoc.title}** was analyzed with ${findingsCount} findings. Overall risk level is **${riskLevel}** with confidence score **${visual.confidenceScore}/100**.
+
+## Structured Entity Map
+${entityLines || '- No entities extracted'}
+
+## Relationship Highlights
+${relationLines || '- No relationships detected'}
+
+## Key Findings
+${visual.highlightedFindings.map((item) => `- ${item}`).join('\n') || '- None'}
+
+## Recommendations
+- Validate all extracted identifiers and map them to confirmed sources.
+- Preserve a timeline for each discovered account, domain, and contact handle.
+- Review recurring usernames, phone numbers, and emails for cross-platform linkage.
+`;
+};
+
 // Generate AI Report
 export const generateReport = async (req: AuthRequest, res: Response) => {
   try {
-    const { caseId, template = 'corporate' } = req.body;
+    const { caseId, template = 'corporate' } = req.body as { caseId?: string; template?: ReportTemplate };
     const userId = req.user?.id;
 
     if (!caseId || !template) {
@@ -57,20 +358,33 @@ export const generateReport = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ message: 'Case not found' });
     }
 
-    const findings = await Finding.find({ caseId });
+    let findings = await Finding.find({ caseId }).lean();
+    let syntheticDataUsed = false;
+
     if (findings.length === 0) {
-      return res.status(400).json({ message: 'No findings available for this case' });
+      findings = buildSyntheticFindingsFromCase(caseDoc);
+      syntheticDataUsed = true;
+    }
+    if (findings.length === 0) {
+      return res.status(400).json({ message: 'No analyzable intelligence found for this case' });
     }
 
     // Format findings for AI
     const formattedFindings = formatFindingsForAI(findings);
+    const extractedEntities = extractEntitiesFromFindings(findings);
+    const avgConfidence = Math.round(
+      findings.reduce((sum, finding) => sum + (finding.confidence || 70), 0) / findings.length
+    );
+    const confidenceScore = Math.max(20, Math.min(100, avgConfidence));
+    const riskLevel = confidenceToRisk(confidenceScore);
+    const visualReport = buildVisualReport(caseDoc, extractedEntities, riskLevel, confidenceScore, findings.length);
 
     // Create AI prompt based on template
     let systemPrompt = `You are a cybersecurity intelligence analyst specializing in OSINT investigations.`;
     let userPrompt = '';
 
     if (template === 'fbi') {
-      systemPrompt += ` Generate a professional FBI-style intelligence report.`;
+      systemPrompt += ` Generate a professional FBI-style intelligence report with concise, structured sections and relationship-focused analysis.`;
       userPrompt = `Convert the following OSINT investigation findings into a formal law enforcement intelligence report.
 
 **Case Title**: ${caseDoc.title}
@@ -87,10 +401,15 @@ ${formattedFindings}
 5. **Risk Assessment** - Overall risk level (Low/Medium/High/Critical)
 6. **Recommendations** - Next investigative steps
 7. **Sources** - List all API sources used
+8. **Relationship Matrix** - Table with Source Entity, Related Entity, Relationship Type, Confidence
 
-Format the report in clear, professional language suitable for law enforcement documentation.`;
+Format requirements:
+- Use Markdown headings and short bullet points.
+- Include at least one table for relationship mapping.
+- Add color semantics using labels like [CRITICAL], [HIGH], [MEDIUM], [LOW] where relevant.
+- Keep tone suitable for law enforcement briefing.`;
     } else {
-      systemPrompt += ` Generate a professional corporate intelligence report.`;
+      systemPrompt += ` Generate a professional corporate intelligence report with readable headings, visual-style structure, and clear bullet points.`;
       userPrompt = `Convert the following OSINT investigation findings into a corporate intelligence report.
 
 **Case Title**: ${caseDoc.title}
@@ -105,35 +424,45 @@ ${formattedFindings}
 3. **Entity Summary** - All identified entities and their significance
 4. **Data Exposure Assessment** - What personal/corporate data was exposed
 5. **Risk Level** - Overall risk rating (Low/Medium/High/Critical)
-6. **Exposure Timeline** - When data/entities were discovered
+6. **Discovery Timeline** - When data/entities were discovered
 7. **Business Impact** - Potential implications
 8. **Remediation Steps** - Recommended actions
 9. **References** - Data sources (APIs and discovery methods)
+10. **Relationship Matrix** - Table with Entity A, Entity B, Relationship, Confidence
 
-Format in professional business language suitable for executive briefing.`;
+Format requirements:
+- Use Markdown headings and concise bullets.
+- Include at least one table for relationships.
+- Use labeled risk tags like [CRITICAL], [HIGH], [MEDIUM], [LOW].
+- Keep tone suitable for executive briefings.`;
     }
 
     // Call Gemini
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
-    const result = await model.generateContent(`${systemPrompt}\n\n${userPrompt}`);
-    const reportContent = result.response.text() || '';
+    let reportContent = buildFallbackMarkdown(caseDoc, template, findings.length, riskLevel, visualReport);
+    if (process.env.GEMINI_API_KEY) {
+      try {
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.5-pro' });
+        const result = await model.generateContent(`${systemPrompt}\n\n${userPrompt}`);
+        const aiText = result.response.text() || '';
+        if (aiText.trim().length > 80) reportContent = aiText;
+      } catch (aiError: any) {
+        console.error('Gemini generation failed, using fallback report:', aiError?.message || aiError);
+      }
+    }
 
-    // Extract key entities and risk level from report
-    const entities: any[] = findings
-      .flatMap((f) => {
-        const ents = [];
-        if (f.email) ents.push({ type: 'email', value: f.email, confidence: f.confidence });
-        if (f.username) ents.push({ type: 'username', value: f.username, confidence: f.confidence });
-        if (f.phone) ents.push({ type: 'phone', value: f.phone, confidence: f.confidence });
-        if (f.domain) ents.push({ type: 'domain', value: f.domain, confidence: f.confidence });
-        return ents;
-      })
-      .filter((v, i, a) => a.findIndex((t) => t.value === v.value) === i); // Deduplicate
+    // Extract key entities and risk level from report content
+    const entities: any[] = extractedEntities
+      .filter((entity) => ['email', 'username', 'phone', 'domain', 'person', 'organization'].includes(entity.type))
+      .map((entity) => ({
+        type: entity.type === 'person' ? 'person' : entity.type === 'organization' ? 'organization' : entity.type,
+        value: entity.value,
+        confidence: entity.confidence,
+      }));
 
-    const riskMatch = reportContent.match(/risk.*?(low|medium|high|critical)/i);
-    const riskLevel = riskMatch ? (riskMatch[1].toLowerCase() as 'Low' | 'Medium' | 'High' | 'Critical') : 'Medium';
-
-    const summary = reportContent.split('\n').slice(0, 3).join('\n').slice(0, 200);
+    const riskMatch = reportContent.match(/risk[^a-z]*(low|medium|high|critical)/i);
+    const contentRisk = normalizeRiskLevel(riskMatch?.[1]);
+    const finalRiskLevel = contentRisk || riskLevel;
+    const summary = reportContent.split('\n').slice(0, 3).join('\n').slice(0, 240);
 
     // Save report to database
     const report = new Report({
@@ -144,7 +473,7 @@ Format in professional business language suitable for executive briefing.`;
       summary,
       generatedBy: userId,
       entities,
-      riskLevel: riskLevel as any,
+      riskLevel: finalRiskLevel as any,
       findings_count: findings.length,
     });
 
@@ -158,7 +487,7 @@ Format in professional business language suitable for executive briefing.`;
     });
 
     // Log activity
-    await logUserActivity(req as any, 'email_lookup', `Generated ${template} report for case: ${caseDoc.title}`, caseId);
+    await logUserActivity(req as any, 'intelligence_report_generated', `Generated ${template} report for case: ${caseDoc.title}`, caseId);
 
     return res.status(201).json({
       success: true,
@@ -170,9 +499,11 @@ Format in professional business language suitable for executive briefing.`;
         content: reportContent,
         summary,
         entities,
-        riskLevel,
+        riskLevel: finalRiskLevel,
         findings_count: findings.length,
         generatedAt: report.generatedAt,
+        visualReport,
+        syntheticDataUsed,
       },
     });
   } catch (error: any) {

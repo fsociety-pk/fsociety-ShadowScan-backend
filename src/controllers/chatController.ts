@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import Groq from 'groq-sdk';
 
 const groq = new Groq({
-    apiKey: process.env.GROQ_API_KEY || 'dummy_key' // User will provide this in .env
+    apiKey: process.env.GROQ_API_KEY || 'dummy_key'
 });
 
 export const handleChat = async (req: Request, res: Response) => {
@@ -16,8 +16,21 @@ export const handleChat = async (req: Request, res: Response) => {
         const systemPrompt = {
             role: 'system',
             content: `You are an advanced AI OSINT (Open Source Intelligence) Assistant integrated into the ShadowScan Platform. 
-Your primary goal is to guide users through intelligence gathering, explain OSINT tools (like Sherlock, TheHarvester, Nmap, ExifTool), and help interpret findings.
-Maintain a professional, analytical, and cyberpunk-esque persona. Do not assist in illegal activities. Always advise users to scan authorized targets only.`
+Your primary goal is to help users with investigations, explain findings, answer general security questions, and produce practical guidance.
+
+Available tool tabs at \`/tools\`:
+- **Username Lookup** (powered by Sherlock) - Page link: \`[Username Lookup](/tools?tool=username)\`
+- **Email Intelligence** (powered by Holehe) - Page link: \`[Email Intelligence](/tools?tool=email)\`
+- **DNS Lookup** (powered by Whois) - Page link: \`[DNS Lookup](/tools?tool=dns)\`
+- **Metadata Forensic Extractor** (powered by ExifTool) - Page link: \`[Metadata Extractor](/tools?tool=metadata)\`
+- **WhatsApp OSINT** - Page link: \`[WhatsApp OSINT](/tools?tool=phone)\`
+
+Rules:
+1. Answer the user's actual question directly; do not force every reply into tool recommendations.
+2. When the user asks about choosing a tool, include the direct link(s) above.
+3. For report or analysis requests, provide structured output with headings, bullet points, and concise interpretations.
+4. Maintain a professional, clear tone. Do not assist with illegal activity or unauthorized access.
+5. Keep answers actionable and context-aware.`
         };
 
         let userContent: any = message || 'Analyze this image.';
@@ -34,11 +47,18 @@ Maintain a professional, analytical, and cyberpunk-esque persona. Do not assist 
             { role: 'user', content: userContent }
         ];
 
+        if (!process.env.GROQ_API_KEY) {
+            const fallback = message
+                ? `I can help with analysis, report structuring, and OSINT guidance. I currently cannot reach Groq because \`GROQ_API_KEY\` is not configured on the server. Once configured, ask me again and I will provide full AI responses.\n\nQuick start:\n- Use [Username Lookup](/tools?tool=username) for handles\n- Use [Email Intelligence](/tools?tool=email) for email traces\n- Use [WhatsApp OSINT](/tools?tool=phone) for phone intelligence\n- Use [DNS Lookup](/tools?tool=dns) for domains`
+                : 'Please send a question or an image for analysis.';
+            return res.json({ success: true, reply: fallback });
+        }
+
         const chatCompletion = await groq.chat.completions.create({
             messages,
-            model: image_url ? 'llama-3.2-11b-vision-preview' : 'llama-3.3-70b-versatile',
-            temperature: 0.7,
-            max_tokens: 1024,
+            model: image_url ? 'meta-llama/llama-4-scout-17b-16e-instruct' : 'llama-3.3-70b-versatile',
+            temperature: 0.45,
+            max_tokens: 1200,
         });
 
         const reply = chatCompletion.choices[0]?.message?.content || 'Error: Could not generate a response.';

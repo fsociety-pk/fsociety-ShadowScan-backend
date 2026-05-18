@@ -5,7 +5,6 @@ import {
   sherlockSearch,
   exiftoolMetadata,
   whoisLookup,
-  theHarvester,
   nmapScan,
   checkToolsAvailability
 } from '../controllers/kaliToolsController';
@@ -63,14 +62,7 @@ router.post('/exiftool', protect, upload.single('file'), exiftoolMetadata);
  */
 router.post('/whois', protect, whoisLookup);
 
-router.post('/theharvester', protect, theHarvester);
 
-/**
- * @route   GET /api/kali-tools/theharvester/stream
- * @desc    Stream live TheHarvester output via Server-Sent Events
- */
-import { theHarvesterStream } from '../controllers/kaliToolsController';
-router.get('/theharvester/stream', theHarvesterStream);
 
 /**
  * @route   POST /api/kali-tools/nmap

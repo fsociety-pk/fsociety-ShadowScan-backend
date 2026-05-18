@@ -29,22 +29,64 @@ export const getCaseById = async (req: AuthRequest, res: Response) => {
 
 export const createCase = async (req: AuthRequest, res: Response) => {
   try {
-    const { title, description, category, priority, clues, toolsSuggested, notes } = req.body;
+    const {
+      title,
+      description,
+      rawFindings,
+      category,
+      priority,
+      clues,
+      toolsSuggested,
+      notes,
+      targetProfile,
+      images
+    } = req.body;
+
+    const normalizedDescription = typeof description === 'string' && description.trim()
+      ? description.trim()
+      : typeof rawFindings === 'string'
+        ? rawFindings.trim()
+        : '';
+
+    if (!title || !category || !normalizedDescription) {
+      return res.status(400).json({
+        message: 'title, category, and description/rawFindings are required.'
+      });
+    }
+
+    const inferredClues = Array.isArray(clues)
+      ? clues
+      : typeof rawFindings === 'string'
+        ? rawFindings
+            .split('\n')
+            .map((line: string) => line.trim())
+            .filter(Boolean)
+        : [];
+
+    const imageSummary = Array.isArray(images) && images.length > 0
+      ? `\n\nAttached images:\n${images
+          .map((img: { label?: string; fileName?: string }, index: number) => `- ${img.label || img.fileName || `image-${index + 1}`}`)
+          .join('\n')}`
+      : '';
     
     const newCase = await Case.create({
       title,
-      description,
+      description: normalizedDescription,
       category,
       priority,
-      clues: clues || [],
-      notes: notes || '',
+      clues: inferredClues,
+      notes: `${notes || ''}${imageSummary}`.trim(),
       createdBy: req.user?.id,
       toolsSuggested: toolsSuggested || [],
+      targetProfile: targetProfile || {},
       status: 'Active'
     });
 
     res.status(201).json({ message: 'Investigation case created', id: newCase._id });
   } catch (error: any) {
+    if (error?.name === 'ValidationError') {
+      return res.status(400).json({ message: error.message });
+    }
     res.status(500).json({ message: error.message });
   }
 };

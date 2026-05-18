@@ -6,7 +6,9 @@ export interface IAdminLog extends Document {
     'email_lookup' | 'username_scan' | 'phone_lookup' | 'metadata_extraction' | 
     'user_created' | 'user_deleted' | 'user_blocked' | 'login_attempt' | 
     'password_reset_request' | 'admin_action' | 'admin_promotion' | 
-    'api_toggle' | 'api_rotate' | 'settings_update' | 'maintenance_toggle';
+    'api_toggle' | 'api_rotate' | 'settings_update' | 'maintenance_toggle' |
+    'network_recon' | 'sherlock_search' | 'exiftool_metadata' | 'whois_lookup' |
+    'nmap_scan' | 'social_media_finder' | 'intelligence_report_generated';
   timestamp: Date;
   toolName: string;
   details: mongoose.Schema.Types.Mixed;
@@ -33,7 +35,14 @@ const AdminLogSchema: Schema = new Schema({
       'api_toggle',
       'api_rotate',
       'settings_update',
-      'maintenance_toggle'
+      'maintenance_toggle',
+      'network_recon',
+      'sherlock_search',
+      'exiftool_metadata',
+      'whois_lookup',
+      'nmap_scan',
+      'social_media_finder',
+      'intelligence_report_generated'
     ], 
     required: true 
   },

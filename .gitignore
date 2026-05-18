@@ -20,3 +20,7 @@ uploads/*
 
 # OS specific
 .DS_Store
+
+# Local scratch files
+usman.txt
+thehusnain.txt

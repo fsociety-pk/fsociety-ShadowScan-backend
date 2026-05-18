@@ -3,7 +3,7 @@ import AdminLog from '../models/AdminLog';
 import User from '../models/User';
 import SystemMetrics from '../models/SystemMetrics';
 
-type ActionType = 'email_lookup' | 'username_scan' | 'phone_lookup' | 'metadata_extraction' | 'sherlock_search' | 'exiftool_metadata' | 'whois_lookup' | 'theharvester_enum' | 'nmap_scan' | 'network_recon' | 'phone_lookup_global' | 'social_media_finder' | 'intelligence_report_generated';
+type ActionType = 'email_lookup' | 'username_scan' | 'phone_lookup' | 'metadata_extraction' | 'sherlock_search' | 'exiftool_metadata' | 'whois_lookup' | 'nmap_scan' | 'network_recon' | 'phone_lookup_global' | 'social_media_finder' | 'intelligence_report_generated' | 'whatsapp_lookup';
 
 /**
  * Logs user activity for OSINT tools without blocking request execution.

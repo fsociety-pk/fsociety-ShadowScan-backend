@@ -7,7 +7,8 @@ import {
     extractMetadata, 
     phoneLookupPK, 
     networkRecon, 
-    phoneLookupGlobal 
+    whatsOSINTLookup,
+    imageOSINT
 } from '../controllers/toolController';
 import { protect } from '../middleware/authMiddleware';
 import { checkSettings } from '../middleware/checkSettings';
@@ -46,10 +47,14 @@ router.post('/extract-metadata', upload.single('file'), extractMetadata);
 // Pakistan Phone Intelligence
 router.post('/phone-lookup-pk', phoneLookupPK);
 
-// Global Phone Intelligence
-router.post('/phone-lookup-global', phoneLookupGlobal);
+
+// WhatsApp Intelligence
+router.post('/whatsapp-lookup', whatsOSINTLookup);
 
 // Network Recon Intelligence
 router.post('/network-recon', networkRecon);
+
+// Image OSINT Intelligence (Gemini AI Vision Engine)
+router.post('/image-osint', upload.single('file'), imageOSINT);
 
 export default router;
