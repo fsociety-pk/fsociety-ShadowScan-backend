@@ -45,7 +45,9 @@ const corsOptions = {
     const isAllowed = allowedOrigins.some(allowed => normalizeOrigin(allowed) === normalizedOrigin) ||
                       normalizedOrigin.endsWith('.vercel.app') ||
                       normalizedOrigin.startsWith('localhost:') ||
-                      normalizedOrigin.startsWith('127.0.0.1:');
+                      normalizedOrigin === 'localhost' ||
+                      normalizedOrigin.startsWith('127.0.0.1:') ||
+                      normalizedOrigin === '127.0.0.1';
     
     if (isAllowed) {
       callback(null, true);
