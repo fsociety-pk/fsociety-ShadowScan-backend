@@ -2,6 +2,7 @@ import { Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { AuthRequest } from './authMiddleware';
 import { isAdmin } from '../utils/roleCheck';
+import { getJwtSecret } from '../config/env';
 
 export const adminAuth = (req: AuthRequest, res: Response, next: NextFunction) => {
   let token;
@@ -11,7 +12,7 @@ export const adminAuth = (req: AuthRequest, res: Response, next: NextFunction) =
       token = req.headers.authorization.split(' ')[1];
       const decoded = jwt.verify(
         token, 
-        process.env.JWT_SECRET as string
+        getJwtSecret()
       ) as { id: string; role: string };
 
       if (!isAdmin(decoded)) {

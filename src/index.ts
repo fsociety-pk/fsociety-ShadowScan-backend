@@ -3,8 +3,10 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import connectDB from './config/db';
 import { initKeyRotationCron } from './crons/keyRotation';
+import { getJwtSecret } from './config/env';
 
 dotenv.config();
+getJwtSecret();
 
 // Connect to Database
 connectDB();

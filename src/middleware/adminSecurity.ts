@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { rateLimiter } from './rateLimiter';
 import AdminAuditLog from '../models/AdminAuditLog';
 import SystemSettings from '../models/SystemSettings';
+import { getJwtSecret } from '../config/env';
 
 // 1. Admin Endpoint Rate Limiter (50 reqs / hour by default)
 export const adminRateLimiter = rateLimiter(1000, 60 * 60 * 1000);
@@ -56,8 +57,7 @@ export const requireReauth = async (req: Request, res: Response, next: NextFunct
     }
 
     try {
-      const secret = process.env.JWT_SECRET || 'super_secret_fsociety_key_change_me_in_prod';
-      const decoded = jwt.verify(token, secret) as any;
+      const decoded = jwt.verify(token, getJwtSecret()) as any;
       if (decoded.id !== (req as any).user?.id || decoded.type !== 'sudo') {
         throw new Error('Invalid sudo token');
       }

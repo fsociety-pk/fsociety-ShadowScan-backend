@@ -4,9 +4,10 @@ import jwt from 'jsonwebtoken';
 import User from '../models/User';
 import AdminLog from '../models/AdminLog';
 import SystemSettings from '../models/SystemSettings';
+import { getJwtSecret } from '../config/env';
 
 const generateToken = (id: string, role: string) => {
-  return jwt.sign({ id, role }, process.env.JWT_SECRET || 'super_secret_fsociety_key_change_me_in_prod', {
+  return jwt.sign({ id, role }, getJwtSecret(), {
     expiresIn: '30d',
   });
 };
@@ -185,7 +186,7 @@ export const sudoElevate = async (req: Request, res: Response): Promise<void> =>
 
     const sudoToken = jwt.sign(
       { id: user.id, type: 'sudo' }, 
-      process.env.JWT_SECRET || 'super_secret_fsociety_key_change_me_in_prod', 
+      getJwtSecret(), 
       { expiresIn: '15m' }
     );
 
