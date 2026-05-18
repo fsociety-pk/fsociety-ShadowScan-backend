@@ -1,9 +1,13 @@
 import { Request, Response } from 'express';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import axios from 'axios';
 import crypto from 'crypto';
-import { spawn } from 'child_process';
-import path from 'path';
 import fs from 'fs';
+import path from 'path';
+import { spawn, exec } from 'child_process';
+import { promisify } from 'util';
+
+const execPromise = promisify(exec);
 import { platforms, Platform } from '../config/platforms';
 import { generateUsernameVariations } from '../utils/usernameUtils';
 import { getRandomUA, getRequestConfig, enforceDelay } from '../utils/requestManager';
@@ -16,14 +20,14 @@ import Finding from '../models/Finding';
 const extractUsernames = (email: string): string[] => {
     const handle = email.split('@')[0].toLowerCase();
     const usernames = new Set<string>();
-    
+
     usernames.add(handle); // john.doe
     usernames.add(handle.replace(/[._-]/g, '')); // johndoe
-    
+
     // Add underscore variation
     if (handle.includes('.')) usernames.add(handle.replace(/\./g, '_')); // john_doe
     if (handle.includes('_')) usernames.add(handle.replace(/_/g, '.')); // john.doe
-    
+
     // Add number-less variation (if ends with numbers, targets common naming patterns)
     usernames.add(handle.replace(/\d+$/, ''));
 
@@ -33,14 +37,14 @@ const extractUsernames = (email: string): string[] => {
         parts.forEach(part => {
             if (part.length > 2) usernames.add(part); // john, doe
         });
-        
+
         // Reversed parts
         if (parts.length === 2) {
             usernames.add(`${parts[1]}.${parts[0]}`);
             usernames.add(`${parts[1]}${parts[0]}`);
         }
     }
-    
+
     return Array.from(usernames).slice(0, 8); // Expanded to 8 variations
 };
 
@@ -57,11 +61,11 @@ const getPythonPath = (): string => {
 const getEmailProviderType = (email: string): 'corporate' | 'webmail' | 'disposable' => {
     const commonWebmail = ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com', 'me.com', 'aol.com'];
     const domain = email.split('@')[1].toLowerCase();
-    
+
     if (commonWebmail.includes(domain)) return 'webmail';
     // Simplified disposable list (in real world use a library or extensive list)
     if (['yopmail.com', 'mailinator.com', 'tempmail.com'].includes(domain)) return 'disposable';
-    
+
     return 'corporate';
 };
 
@@ -85,7 +89,7 @@ const calculateMatchPercentage = (html: string, signatures: string[]): number =>
 const probePlatformWithSignatures = async (username: string, platform: Platform): Promise<any> => {
     const url = platform.url_pattern.replace('{username}', username);
     const isSpecial = ['github', 'linkedin'].includes(platform.name.toLowerCase());
-    
+
     // Step 1: Handle strict delays for special platforms
     if (isSpecial) {
         await enforceDelay(platform.name);
@@ -149,7 +153,7 @@ const probePlatformWithSignatures = async (username: string, platform: Platform)
         } else if (status === 410) {
             return { status: 'suspended', url, confidence: 0.99 };
         }
-        
+
         return { status: 'not_found', url, confidence: 0.5 };
     } catch (e) {
         return { status: 'error', url, message: 'Connection failed', confidence: 0 };
@@ -165,7 +169,7 @@ const probePlatform = async (username: string, platformName: string): Promise<{ 
         const res = await probePlatformWithSignatures(username, config);
         return { found: res.status === 'found', url: res.status === 'found' ? res.url : '' };
     }
-    
+
     // Fallback for undocumented platforms
     const fallbackUrls: Record<string, string> = {
         facebook: `https://www.facebook.com/${username}`,
@@ -189,128 +193,334 @@ const probePlatform = async (username: string, platformName: string): Promise<{ 
     }
 };
 
+
+
 /**
- * Helper: Fetch with retry and exponential backoff
+ * Holehe: Advanced Email OSINT tool integration
  */
-const fetchWithRetry = async (fn: () => Promise<any>, retries = 2, delay = 1000): Promise<any> => {
-    try {
-        return await fn();
-    } catch (error: any) {
-        if (retries <= 0 || (error.response && error.response.status < 500)) throw error;
-        await new Promise(resolve => setTimeout(resolve, delay));
-        return fetchWithRetry(fn, retries - 1, delay * 2);
+const lookupHolehe = async (email: string): Promise<{ raw: string; sites: { domain: string; status: 'found' | 'not_found' | 'rate_limit' | 'error' }[] } | null> => {
+    return new Promise((resolve) => {
+        // Execute holehe --no-color <email> to get ALL platforms checked (confirmed, unused, rate limited, errors)
+        const process = spawn('holehe', ['--no-color', email]);
+
+        let output = '';
+        const timeout = setTimeout(() => {
+            process.kill();
+            resolve(null);
+        }, 40000); // 40 seconds timeout for full lookup of all 120+ platforms
+
+        process.stdout.on('data', (data) => {
+            output += data.toString();
+        });
+
+        process.stderr.on('data', (data) => {
+            output += data.toString();
+        });
+
+        process.on('close', () => {
+            clearTimeout(timeout);
+            try {
+                const lines = output.split('\n');
+                const sites: { domain: string; status: 'found' | 'not_found' | 'rate_limit' | 'error' }[] = [];
+                for (const line of lines) {
+                    let status: 'found' | 'not_found' | 'rate_limit' | 'error' | null = null;
+                    if (line.includes('[+] ')) status = 'found';
+                    else if (line.includes('[-] ')) status = 'not_found';
+                    else if (line.includes('[x] ')) status = 'rate_limit';
+                    else if (line.includes('[!] ')) status = 'error';
+
+                    if (status) {
+                        const parts = line.split(/\[\+\]|\[-\]|\[x\]|\[!\]/);
+                        if (parts.length >= 2) {
+                            let domainPart = parts[1].trim();
+                            // strip trailing slash and anything after it (like / •••••••••••90)
+                            if (domainPart.includes('/')) {
+                                domainPart = domainPart.split('/')[0].trim();
+                            }
+                            const domain = domainPart.trim();
+                            if (domain) {
+                                sites.push({ domain, status });
+                            }
+                        }
+                    }
+                }
+
+                resolve({
+                    raw: output,
+                    sites
+                });
+            } catch (e) {
+                resolve(null);
+            }
+        });
+    });
+};
+
+/**
+ * WhatsOSINT: WhatsApp OSINT lookup
+ */
+export const whatsOSINTLookup = async (req: Request, res: Response): Promise<void> => {
+    const { phone, caseId } = req.body;
+
+    if (!phone) {
+        res.status(400).json({ message: 'Phone number required' });
+        return;
     }
-};
 
-/**
- * Hunter.io: Email Verification & Corporate Data
- */
-const verifyEmailHunter = async (email: string) => {
-    const API_KEY = process.env.HUNTER_API_KEY || process.env.EMAILVALIDATOR_API_KEY;
-    if (!API_KEY) return null;
+    const cleanPhone = phone.replace(/\D/g, '');
+
+    const apiKey = process.env.RAPIDAPI_KEY;
+    const apiHost1 = process.env.RAPIDAPI_HOST || 'whatsapp-data1.p.rapidapi.com';
+    const apiHost2 = process.env.PROFILE_PIC_HOST || 'whatsapp-profile-pic.p.rapidapi.com';
+    const apiHost3 = process.env.VALID_WHATSAPP_HOST || 'valid-whatsapp.p.rapidapi.com';
+
+    // Fail closed when external providers are not configured.
+    if (!apiKey || apiKey.trim() === '' || apiKey.startsWith('your_')) {
+        console.warn('[WhatsApp OSINT] RapidAPI key not set.');
+        res.status(503).json({ message: 'WhatsApp intelligence provider is not configured' });
+        return;
+    }
+
+    // Engine 1: WhatsApp Data (whatsapp-data1) - FETCHES FULL PROFILE WITH REAL PROFILE PICTURE (PFP)
     try {
-        const res = await fetchWithRetry(() => axios.get(`https://api.hunter.io/v2/email-verifier?email=${encodeURIComponent(email)}&api_key=${API_KEY}`, { timeout: 8000 }));
-        return res.data?.data;
-    } catch (e) { return null; }
-};
+        console.log(`[WhatsApp OSINT] Querying primary Engine 1 (whatsapp-data1) for: ${cleanPhone}`);
+        const response = await axios.get(`https://${apiHost1}/number/${cleanPhone}`, {
+            headers: {
+                'x-rapidapi-key': apiKey,
+                'x-rapidapi-host': apiHost1
+            },
+            timeout: 25000,
+            validateStatus: () => true // Allow 503/any status since inUtil Labs often returns profiles with 503 headers
+        });
 
-/**
- * RocketReach: Professional Profile & Socials
- */
-const lookupRocketReach = async (email: string) => {
-    const API_KEY = process.env.ROCKETREACH_API_KEY;
-    if (!API_KEY) return null;
+        const result = response.data;
+
+        // Verify if we got a valid payload
+        if (result && (result.number || result.exists !== undefined || result.phone)) {
+            const isBusiness = !!result.isBusiness || !!result.businessProfile;
+
+            // Robust parsing of display name
+            let name = 'N/A';
+            if (result.name) {
+                name = result.name;
+            } else if (result.businessProfile?.localized_display_name) {
+                name = result.businessProfile.localized_display_name;
+            } else if (result.verifiedName) {
+                name = result.verifiedName;
+            }
+
+            // Robust parsing of status/about
+            let status = 'Active WhatsApp User';
+            if (result.about) {
+                status = result.about;
+            } else if (result.status) {
+                status = result.status;
+            } else if (isBusiness) {
+                status = 'Verified WhatsApp Business Account';
+            }
+
+            // Robust parsing of profile photo
+            const image = result.profilePic || result.urlImage || result.image || "";
+
+            const formattedResult = {
+                phone: result.phone || `+${cleanPhone}`,
+                name: isBusiness && name === 'N/A' ? 'Verified Business' : (name === 'N/A' ? 'Active WhatsApp User' : name),
+                status,
+                image, // Loaded dynamically if public, otherwise silhouette fallback on UI
+                is_business: isBusiness,
+                exists: result.exists !== false,
+                source: 'WhatsOSINT (WhatsApp Profile Engine)',
+                last_updated: new Date().toISOString()
+            };
+
+            logUserActivity(req, 'phone_lookup', 'WhatsApp Intelligence', { phone: cleanPhone });
+
+            if (caseId) {
+                try {
+                    const finding = new Finding({
+                        caseId,
+                        findingType: 'whatsapp_lookup',
+                        source: 'WhatsOSINT (WhatsApp Profile)',
+                        phone: `+${cleanPhone}`,
+                        data: formattedResult,
+                        confidence: 95,
+                        isVerified: true,
+                        tags: ['whatsapp', 'osint', 'phone-lookup'],
+                    });
+                    await finding.save();
+                } catch (fError) { console.error('Error saving whatsapp finding'); }
+            }
+
+            res.json(formattedResult);
+            return;
+        } else {
+            console.warn('[WhatsApp OSINT] Primary Engine 1 returned invalid format, trying Engine 2...');
+        }
+    } catch (primaryErr: any) {
+        console.warn('[WhatsApp OSINT] Primary Engine 1 failed or timed out:', primaryErr.message);
+    }
+
+    // Engine 2: WhatsApp Profile Pic API (whatsapp-profile-pic) - SECONDARY FALLBACK
     try {
-        const res = await fetchWithRetry(() => axios.get(`https://api.rocketreach.co/v2/person/lookup?email=${encodeURIComponent(email)}`, {
-            headers: { 'Api-Key': API_KEY },
-            timeout: 8000
-        }));
-        return res.data;
-    } catch (e) { return null; }
-};
+        console.log(`[WhatsApp OSINT] Querying Engine 2 (whatsapp-profile-pic) for: ${cleanPhone}`);
+        const response = await axios.get(`https://${apiHost2}/isbiz`, {
+            headers: {
+                'x-rapidapi-key': apiKey,
+                'x-rapidapi-host': apiHost2
+            },
+            params: {
+                phone: cleanPhone
+            },
+            timeout: 15000,
+            validateStatus: () => true
+        });
 
-/**
- * Clearbit: Identity Enrichment (Person & Company)
- */
-const enrichClearbit = async (email: string) => {
-    const API_KEY = process.env.CLEARBIT_API_KEY;
-    if (!API_KEY) return null;
+        const result = response.data;
+
+        if (result && result.isbiz !== undefined) {
+            const isBusiness = result.isbiz !== 'Not a Business Account';
+            const formattedResult = {
+                phone: `+${cleanPhone}`,
+                name: isBusiness ? 'Verified WhatsApp Business' : 'Active WhatsApp User',
+                status: isBusiness ? 'Verified WhatsApp Business Account' : 'Active WhatsApp User Profile',
+                image: '', // Silhouette fallback
+                is_business: isBusiness,
+                exists: true,
+                source: 'WhatsOSINT (WhatsApp Profile Pic Network)',
+                last_updated: new Date().toISOString()
+            };
+
+            logUserActivity(req, 'phone_lookup', 'WhatsApp Intelligence', { phone: cleanPhone });
+
+            if (caseId) {
+                try {
+                    const finding = new Finding({
+                        caseId,
+                        findingType: 'whatsapp_lookup',
+                        source: 'WhatsOSINT (WhatsApp Profile Pic Verification)',
+                        phone: `+${cleanPhone}`,
+                        data: formattedResult,
+                        confidence: 90,
+                        isVerified: true,
+                        tags: ['whatsapp', 'osint', 'phone-verification'],
+                    });
+                    await finding.save();
+                } catch (fError) { console.error('Error saving whatsapp finding'); }
+            }
+
+            res.json(formattedResult);
+            return;
+        } else {
+            console.warn('[WhatsApp OSINT] Engine 2 returned invalid format, trying Engine 3...');
+        }
+    } catch (fallbackErr2: any) {
+        console.warn('[WhatsApp OSINT] Engine 2 failed:', fallbackErr2.message);
+    }
+
+    // Engine 3: Valid WhatsApp (valid-whatsapp) - TERTIARY FALLBACK
     try {
-        const res = await fetchWithRetry(() => axios.get(`https://person.clearbit.com/v2/combined/find?email=${encodeURIComponent(email)}`, {
-            auth: { username: API_KEY, password: '' },
-            timeout: 8000
-        }));
-        return res.data;
-    } catch (e) { return null; }
+        console.log(`[WhatsApp OSINT] Querying Engine 3 (valid-whatsapp) for: ${cleanPhone}`);
+        const response = await axios.get(`https://${apiHost3}/isbiz`, {
+            headers: {
+                'x-rapidapi-key': apiKey,
+                'x-rapidapi-host': apiHost3
+            },
+            params: {
+                phone: cleanPhone
+            },
+            timeout: 15000,
+            validateStatus: () => true
+        });
+
+        const result = response.data;
+
+        if (result && result.isbiz !== undefined) {
+            const isBusiness = result.isbiz !== 'Not a Business Account';
+            const formattedResult = {
+                phone: `+${cleanPhone}`,
+                name: isBusiness ? 'Verified WhatsApp Business' : 'Active WhatsApp User',
+                status: isBusiness ? 'Verified WhatsApp Business Account' : 'Active WhatsApp User Profile',
+                image: '', // Silhouette fallback
+                is_business: isBusiness,
+                exists: true,
+                source: 'WhatsOSINT (WhatsApp Verification Network)',
+                last_updated: new Date().toISOString()
+            };
+
+            logUserActivity(req, 'phone_lookup', 'WhatsApp Intelligence', { phone: cleanPhone });
+
+            if (caseId) {
+                try {
+                    const finding = new Finding({
+                        caseId,
+                        findingType: 'whatsapp_lookup',
+                        source: 'WhatsOSINT (WhatsApp Verification)',
+                        phone: `+${cleanPhone}`,
+                        data: formattedResult,
+                        confidence: 90,
+                        isVerified: true,
+                        tags: ['whatsapp', 'osint', 'phone-verification'],
+                    });
+                    await finding.save();
+                } catch (fError) { console.error('Error saving whatsapp finding'); }
+            }
+
+            res.json(formattedResult);
+            return;
+        }
+    } catch (fallbackErr3: any) {
+        console.warn('[WhatsApp OSINT] Engine 3 failed:', fallbackErr3.message);
+    }
+
+    res.status(502).json({ message: 'WhatsApp intelligence providers did not return usable data' });
 };
 
 /**
- * FullContact: Identity & Social Profiles
- */
-const enrichFullContact = async (email: string) => {
-    const API_KEY = process.env.FULLCONTACT_API_KEY;
-    if (!API_KEY) return null;
-    try {
-        const res = await fetchWithRetry(() => axios.post(`https://api.fullcontact.com/v3/person.enrich`, { email }, {
-            headers: { 'Authorization': `Bearer ${API_KEY}` },
-            timeout: 8000
-        }));
-        return res.data;
-    } catch (e) { return null; }
-};
-
-/**
- * Aggregate Results and Scoring
+ * Aggregate Results and Scoring for Holehe
  */
 const aggregateResults = (raw: any) => {
     const profile: any = {
-        name: raw.clearbit?.person?.name?.fullName || raw.fullcontact?.fullName || raw.rocketreach?.name || 'Unknown',
-        avatar: raw.clearbit?.person?.avatar || raw.fullcontact?.avatar || raw.gravatar?.thumbnailUrl || null,
-        bio: raw.fullcontact?.bio || raw.clearbit?.person?.bio || raw.gravatar?.aboutMe || null,
-        location: raw.clearbit?.person?.location || raw.fullcontact?.location || raw.rocketreach?.location || null,
+        name: raw.gravatar?.aboutMe || 'Unknown',
+        avatar: raw.gravatar?.thumbnailUrl || null,
+        bio: raw.gravatar?.aboutMe || null,
+        location: null,
         sources: [],
         confidence_score: 0
     };
 
     const professional: any = {
-        company: raw.clearbit?.company?.legalName || raw.rocketreach?.current_title || raw.hunter?.company || null,
-        title: raw.clearbit?.person?.employment?.title || raw.rocketreach?.job_title || null,
-        domain: raw.clearbit?.company?.domain || (raw.hunter?.webmail ? null : raw.email.split('@')[1]),
-        department: raw.hunter?.department || null
+        company: null,
+        title: null,
+        domain: raw.email.split('@')[1],
+        department: null
     };
 
     // Social Profiles Deduplication
     const socialMap = new Map();
-    
+
     // Add from APIs
     const apiSocials = [
-        ...(raw.clearbit?.person?.linkedin ? [{ platform: 'LinkedIn', url: `https://linkedin.com/${raw.clearbit.person.linkedin.handle}` }] : []),
-        ...(raw.clearbit?.person?.twitter ? [{ platform: 'X', url: `https://x.com/${raw.clearbit.person.twitter.handle}` }] : []),
-        ...(raw.fullcontact?.socialProfiles || []).map((p: any) => ({ platform: p.type, url: p.url, username: p.username })),
         ...raw.discoveredLinks
     ];
 
     apiSocials.forEach(s => {
         const plat = s.platform.toLowerCase();
         if (!socialMap.has(plat) || s.confidence === 'High') {
-            socialMap.set(plat, { ...s, verified: s.confidence === 'High' || !!raw.clearbit || !!raw.fullcontact });
+            socialMap.set(plat, { ...s, verified: s.confidence === 'High' });
         }
     });
 
     // Scoring Logic (Simplified)
     let score = 0;
-    if (raw.hunter?.status === 'valid') score += 0.3;
-    if (raw.clearbit) { score += 0.4; profile.sources.push('Clearbit'); }
-    if (raw.fullcontact) { score += 0.4; profile.sources.push('FullContact'); }
-    if (raw.rocketreach) { score += 0.3; profile.sources.push('RocketReach'); }
+    if (raw.holehe) { score += 0.8; profile.sources.push('Holehe Engine'); }
     if (raw.gravatar) { score += 0.1; profile.sources.push('Gravatar'); }
-    
+
     profile.confidence_score = Math.min(Math.round(score * 100) / 100, 1.0);
     profile.verified = profile.confidence_score > 0.6;
 
-    return { 
-        profile, 
-        professional, 
+    return {
+        profile,
+        professional,
         social_profiles: Array.from(socialMap.values()),
         email_type: getEmailProviderType(raw.email)
     };
@@ -332,10 +542,7 @@ export const emailLookup = async (req: Request, res: Response): Promise<void> =>
             email,
             timestamp: new Date(),
             gravatar: null,
-            hunter: null,
-            rocketreach: null,
-            clearbit: null,
-            fullcontact: null,
+            holehe: null,
             breaches: [],
             discoveredLinks: []
         };
@@ -344,25 +551,35 @@ export const emailLookup = async (req: Request, res: Response): Promise<void> =>
         const mainUsername = targetUsernames[0];
 
         // 1. Parallel Enrichment
-        const [hunter, rocket, clearbit, fullcontact, gravatar] = await Promise.all([
-            verifyEmailHunter(email),
-            lookupRocketReach(email),
-            enrichClearbit(email),
-            enrichFullContact(email),
+        const [gravatar, holehe] = await Promise.all([
             (async () => {
                 const hash = crypto.createHash('md5').update(email.toLowerCase()).digest('hex');
                 try {
                     const gravRes = await axios.get(`https://en.gravatar.com/${hash}.json`, { timeout: 3000 });
                     return gravRes.data.entry?.[0];
                 } catch { return null; }
-            })()
+            })(),
+            lookupHolehe(email)
         ]);
 
-        rawResults.hunter = hunter;
-        rawResults.rocketreach = rocket;
-        rawResults.clearbit = clearbit;
-        rawResults.fullcontact = fullcontact;
         rawResults.gravatar = gravatar;
+        rawResults.holehe = holehe;
+
+        // Inject Holehe found domains directly into discoveredLinks
+        if (holehe && holehe.sites) {
+            holehe.sites.forEach(siteObj => {
+                const site = siteObj.domain;
+                const platformName = site.split('.')[0];
+                const capitalized = platformName.charAt(0).toUpperCase() + platformName.slice(1);
+                rawResults.discoveredLinks.push({
+                    platform: capitalized,
+                    url: `https://${site}`,
+                    username: email,
+                    status: siteObj.status,
+                    confidence: siteObj.status === 'found' ? 'High' : 'Possible'
+                });
+            });
+        }
 
         // 2. Parallel Social Probing (Enhanced to use ALL platforms)
         const discoveryTasks: Promise<any>[] = [];
@@ -374,7 +591,7 @@ export const emailLookup = async (req: Request, res: Response): Promise<void> =>
         });
 
         const discoveryResults = await Promise.all(discoveryTasks);
-        
+
         const foundPlatforms = new Set();
         discoveryResults.forEach(res => {
             if ((res.status === 'found' || res.status === 'suspended') && !foundPlatforms.has(res.platform)) {
@@ -421,7 +638,7 @@ export const emailLookup = async (req: Request, res: Response): Promise<void> =>
                 const finding = new Finding({
                     caseId,
                     findingType: 'email_lookup',
-                    source: 'Multi-Source (Hunter, RocketReach, Clearbit, FullContact, HIBP)',
+                    source: 'Holehe OSINT Engine',
                     email,
                     data: rawResults,
                     confidence: Math.min(100, aggregated.profile.sources.length * 20), // Confidence based on sources found
@@ -441,6 +658,7 @@ export const emailLookup = async (req: Request, res: Response): Promise<void> =>
             status: aggregated.profile.sources.length > 0 ? 'success' : 'partial',
             ...aggregated,
             breaches: rawResults.breaches,
+            holehe: rawResults.holehe,
             last_updated: new Date().toISOString(),
             findingId, // Return Finding ID for frontend reference
         });
@@ -465,12 +683,12 @@ export const usernameLookup = async (req: Request, res: Response): Promise<void>
     try {
         const variations = generateUsernameVariations(username);
         const results: any[] = [];
-        
+
         // Process in small batches to avoid IP bans and high resource usage
         const batchSize = 5;
         for (let i = 0; i < platforms.length; i += batchSize) {
             const batch = platforms.slice(i, i + batchSize);
-            const batchTasks = batch.flatMap(platform => 
+            const batchTasks = batch.flatMap(platform =>
                 // Only try variations for high-priority platforms or keep it simple
                 [username].map(async (v) => {
                     const probeRes = await probePlatformWithSignatures(v, platform);
@@ -481,10 +699,10 @@ export const usernameLookup = async (req: Request, res: Response): Promise<void>
                     };
                 })
             );
-            
+
             const batchResults = await Promise.all(batchTasks);
             results.push(...batchResults);
-            
+
             // Short delay between batches
             if (i + batchSize < platforms.length) {
                 await new Promise(resolve => setTimeout(resolve, 500));
@@ -495,8 +713,8 @@ export const usernameLookup = async (req: Request, res: Response): Promise<void>
         const suspendedCount = results.filter(r => r.status === 'suspended').length;
 
         // LOGGING ACTION
-        logUserActivity(req, 'username_scan', 'Username Intelligence', { 
-            target: username, 
+        logUserActivity(req, 'username_scan', 'Username Intelligence', {
+            target: username,
             platformsScanned: platforms.length,
             found: foundCount,
             suspended: suspendedCount
@@ -575,7 +793,7 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
         const startTime = Date.now();
         console.log(`[METADATA_OSINT] Spawning process: ${pythonPath} ${scriptPath}`);
         const pythonProcess = spawn(pythonPath, [scriptPath, filePath]);
-        
+
         let outputData = '';
         let errorData = '';
         let isFinished = false;
@@ -587,8 +805,8 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
                 pythonProcess.kill();
                 cleanup();
                 console.error(`[METADATA_OSINT] Timeout (30s) reached for: ${filename}`);
-                res.status(504).json({ 
-                    status: 'error', 
+                res.status(504).json({
+                    status: 'error',
                     message: 'Forensic extraction timed out (30s max)',
                     error: 'TIMEOUT'
                 });
@@ -613,10 +831,10 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
 
             if (code !== 0) {
                 console.error(`[METADATA_OSINT] Process crash [Code ${code}]: ${errorData}`);
-                res.status(500).json({ 
-                    status: 'error', 
-                    message: 'Forensic engine crash', 
-                    error: errorData 
+                res.status(500).json({
+                    status: 'error',
+                    message: 'Forensic engine crash',
+                    error: errorData
                 });
                 return;
             }
@@ -624,7 +842,7 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
             try {
                 const result = JSON.parse(outputData);
                 console.log(`[METADATA_OSINT] Success: ${filename} processed in ${extractionTime}ms`);
-                
+
                 // LOGGING ACTION
                 logUserActivity(req, 'metadata_extraction', 'Metadata Forensic Engine', {
                     filename,
@@ -656,10 +874,10 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
                 res.json({ ...result, findingId });
             } catch (e) {
                 console.error(`[METADATA_OSINT] Invalid JSON from engine: ${outputData}`);
-                res.status(500).json({ 
-                    status: 'error', 
-                    message: 'Failed to parse forensic data', 
-                    error: outputData 
+                res.status(500).json({
+                    status: 'error',
+                    message: 'Failed to parse forensic data',
+                    error: outputData
                 });
             }
         });
@@ -693,7 +911,7 @@ export const phoneLookupPK = async (req: Request, res: Response): Promise<void> 
     try {
         // Part B: Process Management
         const pythonProcess = spawn(pythonPath, [scriptPath, phone]);
-        
+
         let outputData = '';
         let errorData = '';
         let processFinished = false;
@@ -705,10 +923,10 @@ export const phoneLookupPK = async (req: Request, res: Response): Promise<void> 
                 const timeoutMsg = `[PHONE_OSINT] Error: Process timed out for ${phone}`;
                 console.error(timeoutMsg);
                 if (!res.headersSent) {
-                    res.status(504).json({ 
-                        status: 'error', 
-                        error: 'Timeout', 
-                        message: 'Telephony engine took too long to respond (5s limit)' 
+                    res.status(504).json({
+                        status: 'error',
+                        error: 'Timeout',
+                        message: 'Telephony engine took too long to respond (5s limit)'
                     });
                 }
             }
@@ -727,17 +945,17 @@ export const phoneLookupPK = async (req: Request, res: Response): Promise<void> 
             clearTimeout(timeoutWatchdog);
 
             const duration = Date.now() - startTime;
-            
+
             // Part C: Error Handling (Crashes)
             if (code !== 0) {
                 const errorLog = `[PHONE_OSINT] Engine crashed. Code: ${code}, Stderr: ${errorData}`;
                 console.error(errorLog);
                 if (!res.headersSent) {
-                    res.status(500).json({ 
-                        status: 'error', 
-                        error: 'Process Error', 
+                    res.status(500).json({
+                        status: 'error',
+                        error: 'Process Error',
                         message: 'Telephony engine failed to execute',
-                        details: errorData 
+                        details: errorData
                     });
                 }
                 return;
@@ -746,12 +964,12 @@ export const phoneLookupPK = async (req: Request, res: Response): Promise<void> 
             // Part D: Response Handling
             try {
                 const result = JSON.parse(outputData);
-                
+
                 // Logging Success (Console)
                 console.log(`[PHONE_OSINT] Success: ${phone} processed in ${duration}ms`);
-                
+
                 // LOGGING ACTION (Database)
-                logUserActivity(req, 'phone_lookup', 'PK Phone Intelligence', { 
+                logUserActivity(req, 'phone_lookup', 'PK Phone Intelligence', {
                     phone,
                     processingTimeMs: duration
                 });
@@ -785,10 +1003,10 @@ export const phoneLookupPK = async (req: Request, res: Response): Promise<void> 
                 const parseError = `[PHONE_OSINT] JSON Parse Error for ${phone}. Output: ${outputData}`;
                 console.error(parseError);
                 if (!res.headersSent) {
-                    res.status(500).json({ 
-                        status: 'error', 
-                        error: 'Parse Error', 
-                        message: 'Invalid engine output format' 
+                    res.status(500).json({
+                        status: 'error',
+                        error: 'Parse Error',
+                        message: 'Invalid engine output format'
                     });
                 }
             }
@@ -807,7 +1025,7 @@ export const phoneLookupPK = async (req: Request, res: Response): Promise<void> 
  * Network Recon Intelligence (Shodan, VirusTotal, AbuseIPDB, Censys)
  */
 export const networkRecon = async (req: Request, res: Response): Promise<void> => {
-    const { target, caseId } = req.body; 
+    const { target, caseId } = req.body;
 
     if (!target) {
         res.status(400).json({ message: 'Target (IP or Domain) required' });
@@ -864,7 +1082,7 @@ export const networkRecon = async (req: Request, res: Response): Promise<void> =
         }
 
         const CENSYS_ID = process.env.CENSYS_API_ID;
-        const CENSYS_SECRET = process.env.CENSYS_API_SECRET; 
+        const CENSYS_SECRET = process.env.CENSYS_API_SECRET;
         if (CENSYS_ID && CENSYS_SECRET) {
             try {
                 const auth = Buffer.from(`${CENSYS_ID}:${CENSYS_SECRET}`).toString('base64');
@@ -900,56 +1118,7 @@ export const networkRecon = async (req: Request, res: Response): Promise<void> =
     }
 };
 
-/**
- * Global Phone Lookup (Twilio)
- */
-export const phoneLookupGlobal = async (req: Request, res: Response): Promise<void> => {
-    const { phone, caseId } = req.body;
-    const SID = process.env.TWILIO_ACCOUNT_SID;
-    const TOKEN = process.env.TWILIO_AUTH_TOKEN;
 
-    if (!phone) {
-        res.status(400).json({ message: 'Phone number required' });
-        return;
-    }
-
-    if (!SID || !TOKEN) {
-        res.status(500).json({ message: 'Twilio credentials not configured' });
-        return;
-    }
-
-    try {
-        const auth = Buffer.from(`${SID}:${TOKEN}`).toString('base64');
-        const response = await axios.get(`https://lookups.twilio.com/v2/PhoneNumbers/${phone}?Fields=caller_name,sim_swap,line_type_intelligence`, {
-            headers: { 'Authorization': `Basic ${auth}` },
-            timeout: 8000
-        });
-
-        const result = response.data;
-        logUserActivity(req, 'phone_lookup_global', 'Global Phone Intelligence', { phone });
-
-        if (caseId) {
-            try {
-                const finding = new Finding({
-                    caseId,
-                    findingType: 'phone_lookup',
-                    source: 'Twilio Global Lookup',
-                    phone,
-                    data: result,
-                    confidence: 95,
-                    isVerified: true,
-                    tags: ['phone', 'global'],
-                });
-                await finding.save();
-            } catch (fError) { console.error('Error saving phone finding'); }
-        }
-
-        res.json(result);
-    } catch (error: any) {
-        console.error('Twilio lookup error:', error.response?.data || error.message);
-        res.status(500).json({ message: 'Twilio lookup failed', error: error.response?.data });
-    }
-};
 
 /**
  * Pastebin Search (Leaked Data)
@@ -975,13 +1144,115 @@ export const pasteSearch = async (req: Request, res: Response): Promise<void> =>
         // If a real scraping API or search API is available, use it here.
         // For demonstration with provided key:
         if (API_KEY) {
-             // Implementation depends on Pastebin API type (Scraping vs Search)
-             // Here we log the attempt
-             console.log(`Searching Pastebin for: ${query}`);
+            // Implementation depends on Pastebin API type (Scraping vs Search)
+            // Here we log the attempt
+            console.log(`Searching Pastebin for: ${query}`);
         }
 
         res.json(results);
     } catch (error) {
         res.status(500).json({ message: 'Paste search failed' });
+    }
+};
+
+/**
+ * Image OSINT using Google Gemini API
+ */
+export const imageOSINT = async (req: Request, res: Response): Promise<void> => {
+    const { caseId } = req.body;
+    const file = req.file;
+
+    if (!file) {
+        res.status(400).json({ message: 'No image file uploaded' });
+        return;
+    }
+
+    try {
+        const apiKey = process.env.GEMINI_API_KEY || '';
+        if (!apiKey) {
+            res.status(500).json({ message: 'Gemini API Key is not configured in backend environment' });
+            return;
+        }
+
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' }); // Use flash for fast and precise visual analysis
+
+        const imagePath = file.path;
+        const mimeType = file.mimetype;
+
+        // Convert uploaded local image to Generative Part
+        const imagePart = {
+            inlineData: {
+                data: fs.readFileSync(imagePath).toString("base64"),
+                mimeType
+            }
+        };
+
+        const userPrompt = `Perform an exhaustive visual forensic analysis on the attached image to extract OSINT and actionable intelligence.
+Please provide a highly detailed, professional-grade analysis report covering:
+
+1. **EXECUTIVE GEOLOCATION SUMMARY & ANALYSIS**:
+   * Estimate the exact or approximate location where this image was captured.
+   * Provide a detailed rationale citing recognizable landmarks, architectural styles, street signs, foliage/vegetation types, license plate formats, or utility pole configurations.
+   * Attempt to estimate or guess coordinates (Latitude/Longitude) if possible, with an estimation confidence level (Low/Medium/High).
+
+2. **VISUAL CLUES & SIGNATURE DETECTION**:
+   * **Objects & Brands**: Identify specific car makes/models, brand logos on buildings/clothing, unique equipment, or manufactured products.
+   * **Text & Typography**: Extract any readable text, street names, billboard advertisements, shop names, or language/script markings.
+   * **Culture & Region**: Analyze signs of driving side (left/right hand drive), power plug outlets visible, specific clothing styles, or regional weather/terrain indications.
+
+3. **METADATA & FORENSIC CHECKS**:
+   * Identify any apparent visual anomalies or indications of digital tampering, synthetic generation (AI-generated features, blending errors), or double compression artifacts.
+
+4. **INTELLIGENCE CORRELATIONS**:
+   * Identify potential threat matrix contexts or other digital footprints that can link this image to a physical location, organization, or operational unit.
+
+Please structure your report in clean, beautiful Markdown format with clear subheadings, and present your findings in a highly technical, investigative manner suitable for a cyber forensic presentation.`;
+
+        const result = await model.generateContent([userPrompt, imagePart]);
+        const responseText = result.response.text();
+
+        // Clean up the uploaded temporary file after processing to maintain server hygiene
+        try {
+            fs.unlinkSync(imagePath);
+        } catch (unlinkErr) {
+            console.error('Error unlinking uploaded image file:', unlinkErr);
+        }
+
+        // Save finding if caseId is provided
+        if (caseId) {
+            try {
+                const finding = new Finding({
+                    caseId,
+                    findingType: 'image_osint',
+                    source: 'Gemini AI Vision Engine',
+                    data: {
+                        analysis: responseText,
+                        fileName: file.originalname,
+                        mimeType: file.mimetype
+                    },
+                    confidence: 85,
+                    isVerified: true,
+                    tags: ['image-osint', 'gemini-vision', 'imint']
+                });
+                await finding.save();
+            } catch (saveErr) {
+                console.error('Error saving image osint finding:', saveErr);
+            }
+        }
+
+        res.json({
+            success: true,
+            analysis: responseText,
+            fileName: file.originalname,
+            mimeType: file.mimetype
+        });
+
+    } catch (error: any) {
+        console.error('Image OSINT error:', error);
+        res.status(500).json({
+            message: 'Error processing Image OSINT via Gemini API',
+            error: error.message
+        });
     }
 };

@@ -84,6 +84,16 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
           }
         }
         
+        // Clean up Sherlock report file from disk to keep workspace pristine
+        const reportPath = path.join(process.cwd(), `${username}.txt`);
+        if (fs.existsSync(reportPath)) {
+          try {
+            fs.unlinkSync(reportPath);
+          } catch (e) {
+            console.error('Failed to delete sherlock report file:', e);
+          }
+        }
+
         results.platforms = platforms;
         results.method = 'Local-Sherlock';
       } catch (execError) {
@@ -446,197 +456,6 @@ export const whoisLookup = async (req: AuthRequest, res: Response) => {
   }
 };
 
-/**
- * TheHarvester - Email and subdomain enumeration
- */
-export const theHarvester = async (req: AuthRequest, res: Response) => {
-  const { domain, source = 'google', caseId } = req.body;
-
-  if (!domain) {
-    return res.status(400).json({ message: 'Target domain required' });
-  }
-
-  try {
-    const results: any = {
-      tool: 'TheHarvester',
-      domain,
-      source,
-      timestamp: new Date(),
-      emails: [],
-      subdomains: [],
-      ips: [],
-      hosts: []
-    };
-
-    const hasTheHarvester = await toolExists('theHarvester');
-
-    if (!hasTheHarvester) {
-      return res.status(503).json({ 
-        message: 'TheHarvester not installed. Install with: pip install theHarvester' 
-      });
-    }
-
-    const tempOutputFile = `/tmp/harvester_${Date.now()}.json`;
-
-    try {
-      const { stdout } = await execPromise(
-        `theHarvester -d "${domain}" -b "${source}" -f "${tempOutputFile}" 2>/dev/null || echo "completed"`
-      );
-
-      // Read output file if it exists
-      if (fs.existsSync(tempOutputFile)) {
-        const data = fs.readFileSync(tempOutputFile, 'utf-8');
-        try {
-          const parsed = JSON.parse(data);
-          results.emails = parsed.emails || [];
-          results.subdomains = parsed.subdomains || [];
-          results.ips = parsed.ips || [];
-          results.hosts = parsed.hosts || [];
-          fs.unlinkSync(tempOutputFile);
-        } catch (parseError) {
-          // If JSON parsing fails, still continue
-        }
-      }
-
-      results.method = 'Local-TheHarvester';
-    } catch (execError) {
-      return res.status(500).json({ message: 'TheHarvester execution failed' });
-    }
-
-    logUserActivity(req, 'theharvester_enum', 'TheHarvester Domain Enumeration', { domain });
-
-    // Save finding if caseId provided
-    if (caseId) {
-      try {
-        const finding = new Finding({
-          caseId,
-          findingType: 'domain_enumeration',
-          source: 'TheHarvester (Kali OSINT)',
-          domain,
-          data: results,
-          confidence: 85,
-          isVerified: false,
-          tags: ['theharvester', 'domain-enum', 'kali-tool', 'email-harvest'],
-        });
-        await finding.save();
-      } catch (findingError) {
-        console.error('Error saving harvester finding:', findingError);
-      }
-    }
-
-    res.json({
-      ...results,
-      summary: {
-        emailsFound: results.emails.length,
-        subdomainsFound: results.subdomains.length,
-        ipsFound: results.ips.length,
-        hostsFound: results.hosts.length,
-        totalFindings: results.emails.length + results.subdomains.length + results.ips.length
-      }
-    });
-  } catch (error) {
-    console.error('TheHarvester error:', error);
-    res.status(500).json({ message: 'TheHarvester execution failed' });
-  }
-};
-
-/**
- * TheHarvester Stream - SSE live output
- */
-export const theHarvesterStream = async (req: Request, res: Response) => {
-  const { target, caseId } = req.query as { target?: string; caseId?: string };
-
-  if (!target) {
-    res.status(400).json({ message: 'Target (domain or email) required' });
-    return;
-  }
-
-  // Set SSE headers
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.flushHeaders();
-
-  const send = (data: object) => {
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
-  };
-
-  send({ type: 'status', message: `[*] Starting reconnaissance for: ${target}` });
-
-  try {
-    const hasHarvester = await toolExists('theHarvester');
-
-    if (!hasHarvester) {
-       send({ type: 'error', message: '[!] theHarvester is not installed on this system.' });
-       res.end();
-       return;
-    }
-
-    const { spawn } = await import('child_process');
-    // Using all sources (-b all) and limiting results (-l 500)
-    const proc = spawn('theHarvester', ['-d', target, '-b', 'all', '-l', '500'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    
-    const results: any = { emails: [], hosts: [], ips: [] };
-
-    proc.stdout.on('data', (chunk: Buffer) => {
-      const output = chunk.toString();
-      const lines = output.split('\n');
-      
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-
-        // Try to parse emails, hosts, etc. from live output
-        if (trimmed.includes('@') && trimmed.includes('.')) {
-           const emailMatch = trimmed.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-           if (emailMatch) {
-             const email = emailMatch[0];
-             if (!results.emails.includes(email)) {
-               results.emails.push(email);
-               send({ type: 'found_email', email });
-             }
-           }
-        }
-        
-        send({ type: 'log', message: trimmed });
-      }
-    });
-
-    proc.stderr.on('data', (chunk: Buffer) => {
-      send({ type: 'log', message: chunk.toString().trim() });
-    });
-
-    await new Promise<void>((resolve) => {
-      proc.on('close', (code) => {
-        send({ type: 'status', message: `[*] Process finished with code ${code}` });
-        resolve();
-      });
-    });
-
-    if (caseId && (results.emails.length > 0)) {
-       try {
-         const finding = new Finding({
-           caseId,
-           findingType: 'email_enumeration',
-           source: 'theHarvester (Kali OSINT)',
-           data: results,
-           confidence: 85,
-           isVerified: false,
-           tags: ['theHarvester', 'email-recon', 'kali-tool'],
-         });
-         await finding.save();
-       } catch {}
-    }
-
-    send({ type: 'done', summary: { emailsFound: results.emails.length, target } });
-
-  } catch (err: any) {
-    send({ type: 'error', message: err.message || 'Stream failed' });
-  }
-
-  res.end();
-};
 
 /**
  * Nmap - Network and port scanning
@@ -744,7 +563,7 @@ export const nmapScan = async (req: AuthRequest, res: Response) => {
  * Returns which Kali tools are installed and ready to use
  */
 export const checkToolsAvailability = async (req: Request, res: Response) => {
-  const tools = ['sherlock', 'exiftool', 'whois', 'theHarvester', 'nmap', 'dnsrecon', 'recon-ng'];
+  const tools = ['sherlock', 'exiftool', 'whois', 'nmap', 'dnsrecon', 'recon-ng'];
   const availability: any = {};
 
   try {
