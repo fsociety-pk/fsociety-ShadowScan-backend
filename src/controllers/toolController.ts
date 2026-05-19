@@ -13,6 +13,8 @@ import { generateUsernameVariations } from '../utils/usernameUtils';
 import { getRandomUA, getRequestConfig, enforceDelay } from '../utils/requestManager';
 import { logUserActivity } from '../utils/logActivity';
 import Finding from '../models/Finding';
+import { fetchWhatsAppProfile } from '../services/whatsappService';
+import { fetchPhoneInfoga } from '../services/phoneInfogaService';
 
 /**
  * Extract possible usernames from an email address (Enhanced)
@@ -257,9 +259,9 @@ const lookupHolehe = async (email: string): Promise<{ raw: string; sites: { doma
 };
 
 /**
- * WhatsOSINT: WhatsApp OSINT lookup
+ * NexusOSINT: WhatsApp OSINT + PhoneInfoga lookup
  */
-export const whatsOSINTLookup = async (req: Request, res: Response): Promise<void> => {
+export const nexusOSINTLookup = async (req: Request, res: Response): Promise<void> => {
     const { phone, caseId } = req.body;
 
     if (!phone) {
@@ -269,210 +271,61 @@ export const whatsOSINTLookup = async (req: Request, res: Response): Promise<voi
 
     const cleanPhone = phone.replace(/\D/g, '');
 
-    const apiKey = process.env.RAPIDAPI_KEY;
-    const apiHost1 = process.env.RAPIDAPI_HOST || 'whatsapp-data1.p.rapidapi.com';
-    const apiHost2 = process.env.PROFILE_PIC_HOST || 'whatsapp-profile-pic.p.rapidapi.com';
-    const apiHost3 = process.env.VALID_WHATSAPP_HOST || 'valid-whatsapp.p.rapidapi.com';
-
-    // Fail closed when external providers are not configured.
-    if (!apiKey || apiKey.trim() === '' || apiKey.startsWith('your_')) {
-        console.warn('[WhatsApp OSINT] RapidAPI key not set.');
-        res.status(503).json({ message: 'WhatsApp intelligence provider is not configured' });
-        return;
-    }
-
-    // Engine 1: WhatsApp Data (whatsapp-data1) - FETCHES FULL PROFILE WITH REAL PROFILE PICTURE (PFP)
     try {
-        console.log(`[WhatsApp OSINT] Querying primary Engine 1 (whatsapp-data1) for: ${cleanPhone}`);
-        const response = await axios.get(`https://${apiHost1}/number/${cleanPhone}`, {
-            headers: {
-                'x-rapidapi-key': apiKey,
-                'x-rapidapi-host': apiHost1
-            },
-            timeout: 25000,
-            validateStatus: () => true // Allow 503/any status since inUtil Labs often returns profiles with 503 headers
-        });
+        // Run both WhatsApp and PhoneInfoga lookups in parallel
+        const [whatsappResult, phoneInfogaResult] = await Promise.allSettled([
+            fetchWhatsAppProfile(cleanPhone),
+            fetchPhoneInfoga(phone)
+        ]);
 
-        const result = response.data;
+        let combinedResult: any = {
+            targetPhone: `+${cleanPhone}`,
+            last_updated: new Date().toISOString(),
+            source: 'NexusOSINT Engine',
+            exists: false
+        };
 
-        // Verify if we got a valid payload
-        if (result && (result.number || result.exists !== undefined || result.phone)) {
-            const isBusiness = !!result.isBusiness || !!result.businessProfile;
-
-            // Robust parsing of display name
-            let name = 'N/A';
-            if (result.name) {
-                name = result.name;
-            } else if (result.businessProfile?.localized_display_name) {
-                name = result.businessProfile.localized_display_name;
-            } else if (result.verifiedName) {
-                name = result.verifiedName;
-            }
-
-            // Robust parsing of status/about
-            let status = 'Active WhatsApp User';
-            if (result.about) {
-                status = result.about;
-            } else if (result.status) {
-                status = result.status;
-            } else if (isBusiness) {
-                status = 'Verified WhatsApp Business Account';
-            }
-
-            // Robust parsing of profile photo
-            const image = result.profilePic || result.urlImage || result.image || "";
-
-            const formattedResult = {
-                phone: result.phone || `+${cleanPhone}`,
-                name: isBusiness && name === 'N/A' ? 'Verified Business' : (name === 'N/A' ? 'Active WhatsApp User' : name),
-                status,
-                image, // Loaded dynamically if public, otherwise silhouette fallback on UI
-                is_business: isBusiness,
-                exists: result.exists !== false,
-                source: 'WhatsOSINT (WhatsApp Profile Engine)',
-                last_updated: new Date().toISOString()
-            };
-
-            logUserActivity(req, 'phone_lookup', 'WhatsApp Intelligence', { phone: cleanPhone });
-
-            if (caseId) {
-                try {
-                    const finding = new Finding({
-                        caseId,
-                        findingType: 'whatsapp_lookup',
-                        source: 'WhatsOSINT (WhatsApp Profile)',
-                        phone: `+${cleanPhone}`,
-                        data: formattedResult,
-                        confidence: 95,
-                        isVerified: true,
-                        tags: ['whatsapp', 'osint', 'phone-lookup'],
-                    });
-                    await finding.save();
-                } catch (fError) { console.error('Error saving whatsapp finding'); }
-            }
-
-            res.json(formattedResult);
-            return;
+        if (whatsappResult.status === 'fulfilled') {
+            combinedResult = { ...combinedResult, whatsapp: whatsappResult.value, exists: true };
         } else {
-            console.warn('[WhatsApp OSINT] Primary Engine 1 returned invalid format, trying Engine 2...');
+            combinedResult.whatsapp = null;
+            combinedResult.whatsappError = whatsappResult.reason.message;
         }
-    } catch (primaryErr: any) {
-        console.warn('[WhatsApp OSINT] Primary Engine 1 failed or timed out:', primaryErr.message);
-    }
 
-    // Engine 2: WhatsApp Profile Pic API (whatsapp-profile-pic) - SECONDARY FALLBACK
-    try {
-        console.log(`[WhatsApp OSINT] Querying Engine 2 (whatsapp-profile-pic) for: ${cleanPhone}`);
-        const response = await axios.get(`https://${apiHost2}/isbiz`, {
-            headers: {
-                'x-rapidapi-key': apiKey,
-                'x-rapidapi-host': apiHost2
-            },
-            params: {
-                phone: cleanPhone
-            },
-            timeout: 15000,
-            validateStatus: () => true
-        });
-
-        const result = response.data;
-
-        if (result && result.isbiz !== undefined) {
-            const isBusiness = result.isbiz !== 'Not a Business Account';
-            const formattedResult = {
-                phone: `+${cleanPhone}`,
-                name: isBusiness ? 'Verified WhatsApp Business' : 'Active WhatsApp User',
-                status: isBusiness ? 'Verified WhatsApp Business Account' : 'Active WhatsApp User Profile',
-                image: '', // Silhouette fallback
-                is_business: isBusiness,
-                exists: true,
-                source: 'WhatsOSINT (WhatsApp Profile Pic Network)',
-                last_updated: new Date().toISOString()
-            };
-
-            logUserActivity(req, 'phone_lookup', 'WhatsApp Intelligence', { phone: cleanPhone });
-
-            if (caseId) {
-                try {
-                    const finding = new Finding({
-                        caseId,
-                        findingType: 'whatsapp_lookup',
-                        source: 'WhatsOSINT (WhatsApp Profile Pic Verification)',
-                        phone: `+${cleanPhone}`,
-                        data: formattedResult,
-                        confidence: 90,
-                        isVerified: true,
-                        tags: ['whatsapp', 'osint', 'phone-verification'],
-                    });
-                    await finding.save();
-                } catch (fError) { console.error('Error saving whatsapp finding'); }
-            }
-
-            res.json(formattedResult);
-            return;
+        if (phoneInfogaResult.status === 'fulfilled') {
+            combinedResult = { ...combinedResult, phoneinfoga: phoneInfogaResult.value };
         } else {
-            console.warn('[WhatsApp OSINT] Engine 2 returned invalid format, trying Engine 3...');
+            combinedResult.phoneinfoga = null;
         }
-    } catch (fallbackErr2: any) {
-        console.warn('[WhatsApp OSINT] Engine 2 failed:', fallbackErr2.message);
-    }
 
-    // Engine 3: Valid WhatsApp (valid-whatsapp) - TERTIARY FALLBACK
-    try {
-        console.log(`[WhatsApp OSINT] Querying Engine 3 (valid-whatsapp) for: ${cleanPhone}`);
-        const response = await axios.get(`https://${apiHost3}/isbiz`, {
-            headers: {
-                'x-rapidapi-key': apiKey,
-                'x-rapidapi-host': apiHost3
-            },
-            params: {
-                phone: cleanPhone
-            },
-            timeout: 15000,
-            validateStatus: () => true
-        });
-
-        const result = response.data;
-
-        if (result && result.isbiz !== undefined) {
-            const isBusiness = result.isbiz !== 'Not a Business Account';
-            const formattedResult = {
-                phone: `+${cleanPhone}`,
-                name: isBusiness ? 'Verified WhatsApp Business' : 'Active WhatsApp User',
-                status: isBusiness ? 'Verified WhatsApp Business Account' : 'Active WhatsApp User Profile',
-                image: '', // Silhouette fallback
-                is_business: isBusiness,
-                exists: true,
-                source: 'WhatsOSINT (WhatsApp Verification Network)',
-                last_updated: new Date().toISOString()
-            };
-
-            logUserActivity(req, 'phone_lookup', 'WhatsApp Intelligence', { phone: cleanPhone });
-
-            if (caseId) {
-                try {
-                    const finding = new Finding({
-                        caseId,
-                        findingType: 'whatsapp_lookup',
-                        source: 'WhatsOSINT (WhatsApp Verification)',
-                        phone: `+${cleanPhone}`,
-                        data: formattedResult,
-                        confidence: 90,
-                        isVerified: true,
-                        tags: ['whatsapp', 'osint', 'phone-verification'],
-                    });
-                    await finding.save();
-                } catch (fError) { console.error('Error saving whatsapp finding'); }
-            }
-
-            res.json(formattedResult);
+        if (!combinedResult.whatsapp && !combinedResult.phoneinfoga?.success) {
+            res.status(502).json({ message: 'NexusOSINT providers did not return usable data', error: combinedResult.whatsappError });
             return;
         }
-    } catch (fallbackErr3: any) {
-        console.warn('[WhatsApp OSINT] Engine 3 failed:', fallbackErr3.message);
-    }
 
-    res.status(502).json({ message: 'WhatsApp intelligence providers did not return usable data' });
+        logUserActivity(req, 'phone_lookup', 'NexusOSINT Intelligence', { phone: cleanPhone });
+
+        if (caseId) {
+            try {
+                const finding = new Finding({
+                    caseId,
+                    findingType: 'phone_lookup',
+                    source: 'NexusOSINT',
+                    phone: `+${cleanPhone}`,
+                    data: combinedResult,
+                    confidence: combinedResult.whatsapp?.exists ? 95 : 70,
+                    isVerified: !!combinedResult.whatsapp?.exists,
+                    tags: ['nexus-osint', 'whatsapp', 'phoneinfoga'],
+                });
+                await finding.save();
+            } catch (fError) { console.error('Error saving NexusOSINT finding'); }
+        }
+
+        res.json(combinedResult);
+    } catch (error: any) {
+        console.error('NexusOSINT Error:', error);
+        res.status(500).json({ message: 'Internal server error during phone lookup' });
+    }
 };
 
 /**

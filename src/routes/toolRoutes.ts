@@ -7,7 +7,7 @@ import {
     extractMetadata, 
     phoneLookupPK, 
     networkRecon, 
-    whatsOSINTLookup,
+    nexusOSINTLookup,
     imageOSINT
 } from '../controllers/toolController';
 import { protect } from '../middleware/authMiddleware';
@@ -48,8 +48,8 @@ router.post('/extract-metadata', upload.single('file'), extractMetadata);
 router.post('/phone-lookup-pk', phoneLookupPK);
 
 
-// WhatsApp Intelligence
-router.post('/whatsapp-lookup', whatsOSINTLookup);
+// NexusOSINT Intelligence
+router.post('/nexus-lookup', nexusOSINTLookup);
 
 // Network Recon Intelligence
 router.post('/network-recon', networkRecon);

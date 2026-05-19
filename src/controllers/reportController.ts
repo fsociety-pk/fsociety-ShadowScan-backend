@@ -5,8 +5,7 @@ import Case from '../models/Case';
 import Report from '../models/Report';
 import Finding from '../models/Finding';
 import { logUserActivity } from '../utils/logActivity';
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+import { generateAIReport } from '../services/reportService';
 
 interface AuthRequest extends Request {
   user?: any;
@@ -441,9 +440,7 @@ Format requirements:
     let reportContent = buildFallbackMarkdown(caseDoc, template, findings.length, riskLevel, visualReport);
     if (process.env.GEMINI_API_KEY) {
       try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.5-pro' });
-        const result = await model.generateContent(`${systemPrompt}\n\n${userPrompt}`);
-        const aiText = result.response.text() || '';
+        const aiText = await generateAIReport(systemPrompt, caseDoc, findings);
         if (aiText.trim().length > 80) reportContent = aiText;
       } catch (aiError: any) {
         console.error('Gemini generation failed, using fallback report:', aiError?.message || aiError);
