@@ -16,53 +16,21 @@ initKeyRotationCron();
 
 const app = express();
 
-const envFrontendOrigins = (process.env.FRONTEND_URLS || '')
-  .split(',')
-  .map((origin) => origin.trim())
-  .filter(Boolean);
-
-const allowedOrigins = [
-  'http://localhost:5173',
-  'https://localhost:5173',
-  'https://fsociety-shadow-scan-frontend.vercel.app',
-  process.env.FRONTEND_URL,
-  ...envFrontendOrigins
-].filter(Boolean) as string[];
-
-// Helper to normalize origins (strips protocols and trailing slashes) for reliable matching
-const normalizeOrigin = (url: string): string => {
-  return url.replace(/^https?:\/\//, '').replace(/\/$/, '').toLowerCase();
-};
-
 const corsOptions = {
-  origin: (origin: string | undefined, callback: any) => {
-    // Allow requests with no origin (like mobile apps, postman, or curl)
-    if (!origin) return callback(null, true);
-    
-    const normalizedOrigin = normalizeOrigin(origin);
-    
-    // Check if the normalized origin is allowed
-    const isAllowed = allowedOrigins.some(allowed => normalizeOrigin(allowed) === normalizedOrigin) ||
-                      normalizedOrigin.endsWith('.vercel.app') ||
-                      normalizedOrigin.startsWith('localhost:') ||
-                      normalizedOrigin === 'localhost' ||
-                      normalizedOrigin.startsWith('127.0.0.1:') ||
-                      normalizedOrigin === '127.0.0.1';
-    
-    if (isAllowed) {
-      callback(null, true);
-    } else {
-      console.warn(`[CORS] Blocked request from origin: ${origin} (Normalized: ${normalizedOrigin})`);
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-csrf-token', 'x-sudo-token'],
+  origin: true, // Reflects the incoming origin — allows any origin with credentials
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-csrf-token', 'x-sudo-token', 'Accept', 'Origin', 'X-Requested-With'],
   credentials: true,
+  maxAge: 86400 // Cache preflight for 24h
 };
 
 app.use(cors(corsOptions));
-app.use(express.json());
+
+// Explicitly handle OPTIONS preflight for all routes
+app.options('*', cors(corsOptions));
+
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 
 const PORT = process.env.PORT || 5000;
