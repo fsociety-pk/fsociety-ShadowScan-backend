@@ -1,0 +1,27 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = __importDefault(require("express"));
+const userRoutes_1 = __importDefault(require("./userRoutes"));
+const analyticsRoutes_1 = __importDefault(require("./analyticsRoutes"));
+const logsRoutes_1 = __importDefault(require("./logsRoutes"));
+const settingsRoutes_1 = __importDefault(require("./settingsRoutes"));
+const apiManagementRoutes_1 = __importDefault(require("./apiManagementRoutes"));
+const checkSettings_1 = require("../../middleware/checkSettings");
+const adminAuth_1 = require("../../middleware/adminAuth");
+const adminControllers_1 = require("../../controllers/adminControllers");
+const adminSecurity_1 = require("../../middleware/adminSecurity");
+const router = express_1.default.Router();
+router.use(checkSettings_1.checkSettings);
+router.use(adminSecurity_1.adminRateLimiter);
+router.use(adminSecurity_1.logAdminAccess);
+router.use(adminSecurity_1.validateCSRF);
+router.use('/users', userRoutes_1.default);
+router.use('/analytics', analyticsRoutes_1.default);
+router.use('/logs', logsRoutes_1.default);
+router.use('/settings', settingsRoutes_1.default);
+router.use('/api-integrations', apiManagementRoutes_1.default);
+router.post('/promote/:userId', adminAuth_1.adminAuth, adminSecurity_1.requireReauth, adminControllers_1.promoteUser);
+exports.default = router;

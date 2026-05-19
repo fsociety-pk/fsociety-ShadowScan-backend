@@ -2,8 +2,8 @@
 node_modules/
 venv/
 
-# Build artifacts
-dist/
+# Build artifacts — committed so server doesn't need to compile TypeScript
+# dist/
 
 # Environment variables
 .env
