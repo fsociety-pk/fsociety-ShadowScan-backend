@@ -14,7 +14,7 @@ export const fetchPhoneInfoga = async (phone: string): Promise<PhoneInfogaResult
         const cleanPhone = phone.replace(/[^0-9+]/g, '').replace('+', '%2B');
         console.log(`[PhoneInfoga OSINT] Querying PhoneInfoga local scan for: ${cleanPhone}`);
         
-        const response = await axios.get(`http://localhost:5000/api/numbers/${cleanPhone}/scan/local`, {
+        const response = await axios.get(`http://localhost:5050/api/numbers/${cleanPhone}/scan/local`, {
             timeout: 10000,
             validateStatus: () => true
         });
