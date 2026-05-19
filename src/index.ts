@@ -26,8 +26,8 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
-// Explicitly handle OPTIONS preflight for all routes
-app.options('*', cors(corsOptions));
+// Handle OPTIONS preflight for all routes (Express 5 / path-to-regexp v8 compatible)
+app.options('/{*path}', cors(corsOptions));
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
