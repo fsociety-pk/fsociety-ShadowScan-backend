@@ -17,14 +17,19 @@ dotenv_1.default.config();
 (0, keyRotation_1.initKeyRotationCron)();
 const app = (0, express_1.default)();
 const FRONTEND_URL = process.env.FRONTEND_URL || process.env.FRONTEND_ORIGIN || '';
+const FRONTEND_ORIGINS = process.env.FRONTEND_ORIGINS || FRONTEND_URL || '';
+const allowedOrigins = FRONTEND_ORIGINS
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 const corsOptions = {
     origin: (origin, callback) => {
-        // If no origin (e.g., server-to-server) allow
+        // Allow server-to-server or tools without Origin header
         if (!origin)
             return callback(null, true);
-        // If FRONTEND_URL is set, only allow that origin
-        if (FRONTEND_URL) {
-            return callback(null, origin === FRONTEND_URL);
+        // If allowedOrigins provided, only allow exact matches
+        if (allowedOrigins.length > 0) {
+            return callback(null, allowedOrigins.includes(origin));
         }
         // Otherwise allow any origin (use caution in production)
         return callback(null, true);
@@ -36,7 +41,7 @@ const corsOptions = {
 };
 app.use((0, cors_1.default)(corsOptions));
 // Handle OPTIONS preflight for all routes
-app.options('*', (0, cors_1.default)(corsOptions));
+app.options('/*', (0, cors_1.default)(corsOptions));
 // Ensure CORS headers are set for any responses even if some middleware short-circuits
 app.use((req, res, next) => {
     const origin = FRONTEND_URL || req.header('Origin') || '*';

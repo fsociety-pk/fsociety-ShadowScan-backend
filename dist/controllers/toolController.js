@@ -204,19 +204,33 @@ const probePlatform = (username, platformName) => __awaiter(void 0, void 0, void
 const lookupHolehe = (email) => __awaiter(void 0, void 0, void 0, function* () {
     return new Promise((resolve) => {
         // Execute holehe --no-color <email> to get ALL platforms checked (confirmed, unused, rate limited, errors)
-        const process = (0, child_process_1.spawn)('holehe', ['--no-color', email]);
+        let childProcess;
+        try {
+            childProcess = (0, child_process_1.spawn)('holehe', ['--no-color', email]);
+        }
+        catch (err) {
+            // holehe not installed or spawn failed
+            return resolve(null);
+        }
         let output = '';
         const timeout = setTimeout(() => {
-            process.kill();
+            try {
+                childProcess.kill();
+            }
+            catch (e) { }
             resolve(null);
         }, 40000); // 40 seconds timeout for full lookup of all 120+ platforms
-        process.stdout.on('data', (data) => {
+        childProcess.stdout.on('data', (data) => {
             output += data.toString();
         });
-        process.stderr.on('data', (data) => {
+        childProcess.stderr.on('data', (data) => {
             output += data.toString();
         });
-        process.on('close', () => {
+        childProcess.on('error', (err) => {
+            clearTimeout(timeout);
+            return resolve(null);
+        });
+        childProcess.on('close', () => {
             clearTimeout(timeout);
             try {
                 const lines = output.split('\n');
