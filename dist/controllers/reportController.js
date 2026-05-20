@@ -303,6 +303,13 @@ const pdfColors = {
     accentSoft: (0, pdf_lib_1.rgb)(0.91, 0.97, 1),
     white: (0, pdf_lib_1.rgb)(1, 1, 1),
 };
+const sanitizePdfText = (text) => String(text || '')
+    .replace(/→/g, '->')
+    .replace(/•/g, '-')
+    .replace(/—/g, '-')
+    .replace(/–/g, '-')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'");
 const createPdfWriter = () => __awaiter(void 0, void 0, void 0, function* () {
     const pdfDoc = yield pdf_lib_1.PDFDocument.create();
     const font = yield pdfDoc.embedFont(pdf_lib_1.StandardFonts.Helvetica);
@@ -339,7 +346,7 @@ const drawWrappedText = (writer, text, options) => {
     const fontSize = options.fontSize || 11;
     const color = options.color || pdfColors.text;
     const lineGap = options.lineGap || 4;
-    const words = text.split(/\s+/).filter(Boolean);
+    const words = sanitizePdfText(text).split(/\s+/).filter(Boolean);
     const lines = [];
     let currentLine = '';
     for (const word of words) {
@@ -358,7 +365,7 @@ const drawWrappedText = (writer, text, options) => {
     const totalHeight = lines.length * (fontSize + lineGap);
     ensureSpace(writer, totalHeight + 6);
     for (const line of lines) {
-        writer.page.drawText(line, {
+        writer.page.drawText(sanitizePdfText(line), {
             x: options.x,
             y: writer.y,
             size: fontSize,
@@ -373,14 +380,14 @@ const drawLabelValue = (writer, label, value, width, options) => {
     const labelWidth = 110;
     const accentColor = (options === null || options === void 0 ? void 0 : options.accentColor) || pdfColors.accent;
     ensureSpace(writer, 28);
-    writer.page.drawText(label.toUpperCase(), {
+    writer.page.drawText(sanitizePdfText(label.toUpperCase()), {
         x: writer.left,
         y: writer.y,
         size: 8.5,
         font: writer.boldFont,
         color: accentColor,
     });
-    drawWrappedText(writer, value || '—', {
+    drawWrappedText(writer, value || '-', {
         x: writer.left + labelWidth,
         width: width - labelWidth,
         fontSize: 11,
@@ -400,7 +407,7 @@ const drawSectionTitle = (writer, title) => {
         borderColor: pdfColors.border,
         borderWidth: 1,
     });
-    writer.page.drawText(title.toUpperCase(), {
+    writer.page.drawText(sanitizePdfText(title.toUpperCase()), {
         x: writer.left + 10,
         y: writer.y - 2,
         size: 9.5,
@@ -411,7 +418,8 @@ const drawSectionTitle = (writer, title) => {
 };
 const drawPill = (writer, text, x, y, color = pdfColors.accent) => {
     const paddingX = 8;
-    const pillWidth = writer.boldFont.widthOfTextAtSize(text, 9) + paddingX * 2;
+    const safeText = sanitizePdfText(text);
+    const pillWidth = writer.boldFont.widthOfTextAtSize(safeText, 9) + paddingX * 2;
     writer.page.drawRectangle({
         x,
         y: y - 2,
@@ -422,7 +430,7 @@ const drawPill = (writer, text, x, y, color = pdfColors.accent) => {
         borderColor: color,
         borderWidth: 1,
     });
-    writer.page.drawText(text, {
+    writer.page.drawText(safeText, {
         x: x + paddingX,
         y,
         size: 9,
@@ -691,14 +699,14 @@ const exportReportPDF = (req, res) => __awaiter(void 0, void 0, void 0, function
             borderColor: pdfColors.border,
             borderWidth: 1,
         });
-        writer.page.drawText('CASE DOSSIER', {
+        writer.page.drawText(sanitizePdfText('CASE DOSSIER'), {
             x: writer.left,
             y: writer.pageHeight - 36,
             size: 10,
             font: writer.boldFont,
             color: pdfColors.accent,
         });
-        writer.page.drawText(caseTitle, {
+        writer.page.drawText(sanitizePdfText(caseTitle), {
             x: writer.left,
             y: writer.pageHeight - 58,
             size: 20,
@@ -744,7 +752,7 @@ const exportReportPDF = (req, res) => __awaiter(void 0, void 0, void 0, function
             borderColor: pdfColors.border,
             borderWidth: 1,
         });
-        writer.page.drawText('Executive Summary', {
+        writer.page.drawText(sanitizePdfText('Executive Summary'), {
             x: writer.left + 12,
             y: writer.y - 24,
             size: 12,
@@ -781,14 +789,14 @@ const exportReportPDF = (req, res) => __awaiter(void 0, void 0, void 0, function
                 borderColor: pdfColors.border,
                 borderWidth: 1,
             });
-            writer.page.drawText(stat.label.toUpperCase(), {
+            writer.page.drawText(sanitizePdfText(stat.label.toUpperCase()), {
                 x: x + 10,
                 y: statY + 34,
                 size: 8,
                 font: writer.boldFont,
                 color: pdfColors.muted,
             });
-            writer.page.drawText(stat.value, {
+            writer.page.drawText(sanitizePdfText(stat.value), {
                 x: x + 10,
                 y: statY + 16,
                 size: 16,
@@ -855,7 +863,7 @@ const exportReportPDF = (req, res) => __awaiter(void 0, void 0, void 0, function
                     borderColor: pdfColors.border,
                     borderWidth: 1,
                 });
-                writer.page.drawText(type.toUpperCase(), {
+                writer.page.drawText(sanitizePdfText(type.toUpperCase()), {
                     x: writer.left + 10,
                     y: writer.y - 16,
                     size: 9,
@@ -928,7 +936,7 @@ const exportReportPDF = (req, res) => __awaiter(void 0, void 0, void 0, function
             }
         }
         // Footer on the final page
-        writer.page.drawText(`Generated by Shadow Scan • ${new Date(report.generatedAt).toLocaleString()}`, {
+        writer.page.drawText(sanitizePdfText(`Generated by Shadow Scan • ${new Date(report.generatedAt).toLocaleString()}`), {
             x: writer.left,
             y: 28,
             size: 8.5,
