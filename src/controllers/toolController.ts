@@ -203,23 +203,34 @@ const probePlatform = async (username: string, platformName: string): Promise<{ 
 const lookupHolehe = async (email: string): Promise<{ raw: string; sites: { domain: string; status: 'found' | 'not_found' | 'rate_limit' | 'error' }[] } | null> => {
     return new Promise((resolve) => {
         // Execute holehe --no-color <email> to get ALL platforms checked (confirmed, unused, rate limited, errors)
-        const process = spawn('holehe', ['--no-color', email]);
+        let childProcess;
+        try {
+            childProcess = spawn('holehe', ['--no-color', email]);
+        } catch (err) {
+            // holehe not installed or spawn failed
+            return resolve(null);
+        }
 
         let output = '';
         const timeout = setTimeout(() => {
-            process.kill();
+            try { childProcess.kill(); } catch (e) {}
             resolve(null);
         }, 40000); // 40 seconds timeout for full lookup of all 120+ platforms
 
-        process.stdout.on('data', (data) => {
+        childProcess.stdout.on('data', (data) => {
             output += data.toString();
         });
 
-        process.stderr.on('data', (data) => {
+        childProcess.stderr.on('data', (data) => {
             output += data.toString();
         });
 
-        process.on('close', () => {
+        childProcess.on('error', (err) => {
+            clearTimeout(timeout);
+            return resolve(null);
+        });
+
+        childProcess.on('close', () => {
             clearTimeout(timeout);
             try {
                 const lines = output.split('\n');
