@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { PDFDocument, rgb } from 'pdf-lib';
+import { PDFDocument, PDFFont, StandardFonts, rgb } from 'pdf-lib';
 import Case from '../models/Case';
 import Report from '../models/Report';
 import Finding from '../models/Finding';
@@ -337,6 +337,211 @@ ${visual.highlightedFindings.map((item) => `- ${item}`).join('\n') || '- None'}
 `;
 };
 
+const pdfColors = {
+  text: rgb(0.09, 0.12, 0.18),
+  muted: rgb(0.39, 0.45, 0.55),
+  border: rgb(0.88, 0.91, 0.95),
+  panel: rgb(0.97, 0.98, 0.99),
+  accent: rgb(0.06, 0.65, 0.91),
+  accentSoft: rgb(0.91, 0.97, 1),
+  white: rgb(1, 1, 1),
+};
+
+type PdfWriter = {
+  pdfDoc: PDFDocument;
+  page: any;
+  pageWidth: number;
+  pageHeight: number;
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+  y: number;
+  font: PDFFont;
+  boldFont: PDFFont;
+  smallFont: PDFFont;
+};
+
+const createPdfWriter = async () => {
+  const pdfDoc = await PDFDocument.create();
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const boldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const smallFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const page = pdfDoc.addPage([612, 792]);
+  const pageWidth = page.getWidth();
+  const pageHeight = page.getHeight();
+
+  return {
+    pdfDoc,
+    page,
+    pageWidth,
+    pageHeight,
+    left: 42,
+    right: 42,
+    top: 44,
+    bottom: 42,
+    y: pageHeight - 44,
+    font,
+    boldFont,
+    smallFont,
+  } satisfies PdfWriter;
+};
+
+const ensureSpace = (writer: PdfWriter, requiredHeight: number) => {
+  if (writer.y - requiredHeight < writer.bottom) {
+    writer.page = writer.pdfDoc.addPage([612, 792]);
+    writer.pageWidth = writer.page.getWidth();
+    writer.pageHeight = writer.page.getHeight();
+    writer.y = writer.pageHeight - writer.top;
+  }
+};
+
+const drawWrappedText = (
+  writer: PdfWriter,
+  text: string,
+  options: { x: number; width: number; fontSize?: number; font?: PDFFont; color?: any; lineGap?: number }
+) => {
+  const font = options.font || writer.font;
+  const fontSize = options.fontSize || 11;
+  const color = options.color || pdfColors.text;
+  const lineGap = options.lineGap || 4;
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let currentLine = '';
+
+  for (const word of words) {
+    const testLine = currentLine ? `${currentLine} ${word}` : word;
+    const lineWidth = font.widthOfTextAtSize(testLine, fontSize);
+    if (lineWidth > options.width && currentLine) {
+      lines.push(currentLine);
+      currentLine = word;
+    } else {
+      currentLine = testLine;
+    }
+  }
+
+  if (currentLine) lines.push(currentLine);
+
+  const totalHeight = lines.length * (fontSize + lineGap);
+  ensureSpace(writer, totalHeight + 6);
+
+  for (const line of lines) {
+    writer.page.drawText(line, {
+      x: options.x,
+      y: writer.y,
+      size: fontSize,
+      font,
+      color,
+    });
+    writer.y -= fontSize + lineGap;
+  }
+
+  return totalHeight;
+};
+
+const drawLabelValue = (
+  writer: PdfWriter,
+  label: string,
+  value: string,
+  width: number,
+  options?: { accentColor?: any }
+) => {
+  const labelWidth = 110;
+  const accentColor = options?.accentColor || pdfColors.accent;
+  ensureSpace(writer, 28);
+
+  writer.page.drawText(label.toUpperCase(), {
+    x: writer.left,
+    y: writer.y,
+    size: 8.5,
+    font: writer.boldFont,
+    color: accentColor,
+  });
+
+  drawWrappedText(writer, value || '—', {
+    x: writer.left + labelWidth,
+    width: width - labelWidth,
+    fontSize: 11,
+    font: writer.font,
+    color: pdfColors.text,
+    lineGap: 3,
+  });
+};
+
+const drawSectionTitle = (writer: PdfWriter, title: string) => {
+  ensureSpace(writer, 28);
+  writer.page.drawRectangle({
+    x: writer.left,
+    y: writer.y - 16,
+    width: writer.pageWidth - writer.left - writer.right,
+    height: 20,
+    color: pdfColors.accentSoft,
+    borderColor: pdfColors.border,
+    borderWidth: 1,
+  });
+  writer.page.drawText(title.toUpperCase(), {
+    x: writer.left + 10,
+    y: writer.y - 2,
+    size: 9.5,
+    font: writer.boldFont,
+    color: pdfColors.accent,
+  });
+  writer.y -= 28;
+};
+
+const drawPill = (writer: PdfWriter, text: string, x: number, y: number, color = pdfColors.accent) => {
+  const paddingX = 8;
+  const pillWidth = writer.boldFont.widthOfTextAtSize(text, 9) + paddingX * 2;
+  writer.page.drawRectangle({
+    x,
+    y: y - 2,
+    width: pillWidth,
+    height: 16,
+    color,
+    opacity: 0.12,
+    borderColor: color,
+    borderWidth: 1,
+  });
+  writer.page.drawText(text, {
+    x: x + paddingX,
+    y,
+    size: 9,
+    font: writer.boldFont,
+    color,
+  });
+  return pillWidth;
+};
+
+const getMarkdownSections = (content: string) => {
+  const lines = content.split('\n');
+  const sections: { heading: string; body: string[] }[] = [];
+  let current: { heading: string; body: string[] } | null = null;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const headingMatch = line.match(/^#{1,3}\s+(.*)$/);
+    if (headingMatch) {
+      current = { heading: headingMatch[1].trim(), body: [] };
+      sections.push(current);
+      continue;
+    }
+    if (!current) {
+      current = { heading: 'Overview', body: [] };
+      sections.push(current);
+    }
+    current.body.push(line);
+  }
+
+  return sections.slice(0, 8);
+};
+
+const parseBulletList = (lines: string[]) =>
+  lines
+    .map((line) => line.replace(/^[-*]\s*/, '').trim())
+    .filter(Boolean)
+    .slice(0, 8);
+
 // Generate AI Report
 export const generateReport = async (req: AuthRequest, res: Response) => {
   try {
@@ -558,44 +763,284 @@ export const exportReportPDF = async (req: AuthRequest, res: Response) => {
   try {
     const { reportId } = req.params;
 
-    const report = await Report.findById(reportId).populate('caseId', 'title description');
+    const report = await Report.findById(reportId).populate('caseId', 'title description category priority status clues targetProfile');
     if (!report) {
       return res.status(404).json({ message: 'Report not found' });
     }
 
-    // Create PDF
-    const pdfDoc = await PDFDocument.create();
-    let page = pdfDoc.addPage([612, 792]); // Letter size
-    const { height } = page.getSize();
-    let yPosition = height - 50;
+    const writer = await createPdfWriter();
+    const caseDoc = report.caseId as any;
+    const caseTitle = caseDoc?.title || report.title;
+    const caseDescription = caseDoc?.description || '';
+    const clues = Array.isArray(caseDoc?.clues) ? caseDoc.clues : [];
+    const targetProfile = caseDoc?.targetProfile || {};
+    const entityGroups = report.entities.reduce((acc: Record<string, string[]>, entity) => {
+      if (!acc[entity.type]) acc[entity.type] = [];
+      if (!acc[entity.type].includes(entity.value)) acc[entity.type].push(entity.value);
+      return acc;
+    }, {});
+    const markdownSections = getMarkdownSections(report.content);
+    const bullets = parseBulletList(report.content.split('\n'));
 
-    const drawText = (text: string, fontSize: number = 12, isBold: boolean = false) => {
-      if (yPosition < 50) {
-        page = pdfDoc.addPage([612, 792]);
-        yPosition = height - 50;
-      }
-      page.drawText(text, {
-        x: 50,
-        y: yPosition,
-        size: fontSize,
-        color: rgb(0, 0, 0),
+    // Header
+    writer.page.drawRectangle({
+      x: 0,
+      y: writer.pageHeight - 110,
+      width: writer.pageWidth,
+      height: 110,
+      color: pdfColors.white,
+      borderColor: pdfColors.border,
+      borderWidth: 1,
+    });
+    writer.page.drawText('CASE DOSSIER', {
+      x: writer.left,
+      y: writer.pageHeight - 36,
+      size: 10,
+      font: writer.boldFont,
+      color: pdfColors.accent,
+    });
+    writer.page.drawText(caseTitle, {
+      x: writer.left,
+      y: writer.pageHeight - 58,
+      size: 20,
+      font: writer.boldFont,
+      color: pdfColors.text,
+    });
+    drawWrappedText(writer, report.summary || 'Structured intelligence report generated from case findings.', {
+      x: writer.left,
+      width: writer.pageWidth - writer.left - writer.right - 150,
+      fontSize: 10.5,
+      font: writer.font,
+      color: pdfColors.muted,
+      lineGap: 3,
+    });
+
+    const riskColor = report.riskLevel === 'Critical'
+      ? rgb(0.83, 0.15, 0.15)
+      : report.riskLevel === 'High'
+        ? rgb(0.92, 0.38, 0.1)
+        : report.riskLevel === 'Medium'
+          ? rgb(0.79, 0.62, 0.0)
+          : rgb(0.09, 0.64, 0.28);
+    drawPill(writer, `${report.riskLevel.toUpperCase()} RISK`, writer.pageWidth - 180, writer.pageHeight - 48, riskColor);
+
+    writer.y = writer.pageHeight - 128;
+
+    // Meta chips
+    const metaText = [
+      `Template: ${report.template.toUpperCase()}`,
+      `Findings: ${report.findings_count}`,
+      `Generated: ${new Date(report.generatedAt).toLocaleString()}`,
+    ];
+    let chipX = writer.left;
+    for (const item of metaText) {
+      const width = drawPill(writer, item, chipX, writer.y, pdfColors.accent);
+      chipX += width + 10;
+    }
+    writer.y -= 28;
+
+    // Executive summary panel
+    writer.page.drawRectangle({
+      x: writer.left,
+      y: writer.y - 82,
+      width: writer.pageWidth - writer.left - writer.right,
+      height: 82,
+      color: pdfColors.panel,
+      borderColor: pdfColors.border,
+      borderWidth: 1,
+    });
+    writer.page.drawText('Executive Summary', {
+      x: writer.left + 12,
+      y: writer.y - 24,
+      size: 12,
+      font: writer.boldFont,
+      color: pdfColors.text,
+    });
+    drawWrappedText(writer, report.summary || 'No summary available.', {
+      x: writer.left + 12,
+      width: writer.pageWidth - writer.left - writer.right - 24,
+      fontSize: 10.5,
+      font: writer.font,
+      color: pdfColors.muted,
+      lineGap: 3,
+    });
+    writer.y -= 96;
+
+    // Key stats
+    drawSectionTitle(writer, 'Overview');
+    const statWidth = (writer.pageWidth - writer.left - writer.right - 18) / 3;
+    const statHeight = 54;
+    const statY = writer.y - statHeight;
+    const stats = [
+      { label: 'Risk Level', value: report.riskLevel },
+      { label: 'Findings', value: String(report.findings_count) },
+      { label: 'Entities', value: String(report.entities.length) },
+    ];
+    stats.forEach((stat, index) => {
+      const x = writer.left + index * (statWidth + 9);
+      writer.page.drawRectangle({
+        x,
+        y: statY,
+        width: statWidth,
+        height: statHeight,
+        color: pdfColors.white,
+        borderColor: pdfColors.border,
+        borderWidth: 1,
       });
-      yPosition -= fontSize + 8;
-    };
+      writer.page.drawText(stat.label.toUpperCase(), {
+        x: x + 10,
+        y: statY + 34,
+        size: 8,
+        font: writer.boldFont,
+        color: pdfColors.muted,
+      });
+      writer.page.drawText(stat.value, {
+        x: x + 10,
+        y: statY + 16,
+        size: 16,
+        font: writer.boldFont,
+        color: pdfColors.text,
+      });
+    });
+    writer.y = statY - 18;
 
-    drawText(report.title, 16, true);
-    drawText(`Template: ${report.template.toUpperCase()}`, 11);
-    drawText(`Risk Level: ${report.riskLevel}`, 11);
-    drawText(`Generated: ${new Date(report.generatedAt).toLocaleDateString()}`, 10);
-    drawText('', 10);
+    // Identity and profile block
+    drawSectionTitle(writer, 'Identity Summary');
+    drawLabelValue(writer, 'Target', caseTitle, writer.pageWidth - writer.left - writer.right);
+    if (targetProfile?.name) drawLabelValue(writer, 'Name', String(targetProfile.name), writer.pageWidth - writer.left - writer.right);
+    if (targetProfile?.email) drawLabelValue(writer, 'Email', String(targetProfile.email), writer.pageWidth - writer.left - writer.right);
+    if (targetProfile?.phone) drawLabelValue(writer, 'Phone', String(targetProfile.phone), writer.pageWidth - writer.left - writer.right);
+    if (targetProfile?.organization) drawLabelValue(writer, 'Organization', String(targetProfile.organization), writer.pageWidth - writer.left - writer.right);
+    if (targetProfile?.location) drawLabelValue(writer, 'Location', String(targetProfile.location), writer.pageWidth - writer.left - writer.right);
+    if (targetProfile?.socialMedia) drawLabelValue(writer, 'Social', String(targetProfile.socialMedia), writer.pageWidth - writer.left - writer.right);
 
-    // Split content into lines
-    const lines = report.content.split('\n');
-    for (const line of lines) {
-      drawText(line, 10);
+    if (caseDescription) {
+      writer.y -= 8;
+      drawLabelValue(writer, 'Case Notes', caseDescription, writer.pageWidth - writer.left - writer.right);
     }
 
-    const pdfBytes = await pdfDoc.save();
+    if (clues.length) {
+      writer.y -= 4;
+      drawSectionTitle(writer, 'Known Clues');
+      for (const clue of clues.slice(0, 5)) {
+        drawWrappedText(writer, `• ${clue}`, {
+          x: writer.left + 4,
+          width: writer.pageWidth - writer.left - writer.right - 8,
+          fontSize: 10.5,
+          font: writer.font,
+          color: pdfColors.text,
+          lineGap: 3,
+        });
+      }
+    }
+
+    // Entity grid
+    drawSectionTitle(writer, 'Entity Groups');
+    const groupedEntries = Object.entries(entityGroups);
+    if (groupedEntries.length === 0) {
+      drawWrappedText(writer, 'No structured entities were extracted for this report.', {
+        x: writer.left + 4,
+        width: writer.pageWidth - writer.left - writer.right - 8,
+        fontSize: 10.5,
+        font: writer.font,
+        color: pdfColors.muted,
+        lineGap: 3,
+      });
+    } else {
+      for (const [type, values] of groupedEntries.slice(0, 6)) {
+        ensureSpace(writer, 54);
+        writer.page.drawRectangle({
+          x: writer.left,
+          y: writer.y - 46,
+          width: writer.pageWidth - writer.left - writer.right,
+          height: 46,
+          color: pdfColors.white,
+          borderColor: pdfColors.border,
+          borderWidth: 1,
+        });
+        writer.page.drawText(type.toUpperCase(), {
+          x: writer.left + 10,
+          y: writer.y - 16,
+          size: 9,
+          font: writer.boldFont,
+          color: pdfColors.accent,
+        });
+        drawWrappedText(writer, values.slice(0, 8).join(', '), {
+          x: writer.left + 10,
+          width: writer.pageWidth - writer.left - writer.right - 20,
+          fontSize: 10.5,
+          font: writer.font,
+          color: pdfColors.text,
+          lineGap: 3,
+        });
+        writer.y -= 56;
+      }
+    }
+
+    // Highlights
+    drawSectionTitle(writer, 'Highlights');
+    const highlightSource = markdownSections.find((section) => /findings|highlights|summary/i.test(section.heading));
+    const highlightLines = highlightSource ? parseBulletList(highlightSource.body) : bullets.slice(0, 5);
+    if (highlightLines.length === 0) {
+      drawWrappedText(writer, 'No highlights were available in the report content.', {
+        x: writer.left + 4,
+        width: writer.pageWidth - writer.left - writer.right - 8,
+        fontSize: 10.5,
+        font: writer.font,
+        color: pdfColors.muted,
+        lineGap: 3,
+      });
+    } else {
+      for (const item of highlightLines) {
+        drawWrappedText(writer, `• ${item}`, {
+          x: writer.left + 4,
+          width: writer.pageWidth - writer.left - writer.right - 8,
+          fontSize: 10.5,
+          font: writer.font,
+          color: pdfColors.text,
+          lineGap: 3,
+        });
+      }
+    }
+
+    // Narrative sections from markdown
+    const narrativeSections = markdownSections.filter((section) => !/findings|highlights/i.test(section.heading)).slice(0, 4);
+    for (const section of narrativeSections) {
+      drawSectionTitle(writer, section.heading);
+      const sectionBody = parseBulletList(section.body);
+      if (sectionBody.length === 0) {
+        drawWrappedText(writer, section.body.join(' '), {
+          x: writer.left + 4,
+          width: writer.pageWidth - writer.left - writer.right - 8,
+          fontSize: 10.5,
+          font: writer.font,
+          color: pdfColors.text,
+          lineGap: 3,
+        });
+      } else {
+        for (const item of sectionBody) {
+          drawWrappedText(writer, `• ${item}`, {
+            x: writer.left + 4,
+            width: writer.pageWidth - writer.left - writer.right - 8,
+            fontSize: 10.5,
+            font: writer.font,
+            color: pdfColors.text,
+            lineGap: 3,
+          });
+        }
+      }
+    }
+
+    // Footer on the final page
+    writer.page.drawText(`Generated by Shadow Scan • ${new Date(report.generatedAt).toLocaleString()}`, {
+      x: writer.left,
+      y: 28,
+      size: 8.5,
+      font: writer.smallFont,
+      color: pdfColors.muted,
+    });
+
+    const pdfBytes = await writer.pdfDoc.save();
 
     res.contentType('application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="report-${report._id}.pdf"`);
