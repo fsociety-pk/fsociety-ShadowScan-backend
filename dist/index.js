@@ -41,11 +41,15 @@ const corsOptions = {
 };
 app.use((0, cors_1.default)(corsOptions));
 // Handle OPTIONS preflight for all routes
-app.options('/*', (0, cors_1.default)(corsOptions));
+app.options(/.*/, (0, cors_1.default)(corsOptions));
 // Ensure CORS headers are set for any responses even if some middleware short-circuits
 app.use((req, res, next) => {
-    const origin = FRONTEND_URL || req.header('Origin') || '*';
-    res.setHeader('Access-Control-Allow-Origin', origin);
+    const requestOrigin = req.header('Origin');
+    let originToSet = FRONTEND_URL || '*';
+    if (requestOrigin && allowedOrigins.includes(requestOrigin)) {
+        originToSet = requestOrigin;
+    }
+    res.setHeader('Access-Control-Allow-Origin', originToSet);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-csrf-token, x-sudo-token, Accept, Origin, X-Requested-With');
