@@ -16,16 +16,38 @@ dotenv_1.default.config();
 // Initialize Crons
 (0, keyRotation_1.initKeyRotationCron)();
 const app = (0, express_1.default)();
+const FRONTEND_URL = process.env.FRONTEND_URL || process.env.FRONTEND_ORIGIN || '';
 const corsOptions = {
-    origin: true, // Reflects the incoming origin — allows any origin with credentials
+    origin: (origin, callback) => {
+        // If no origin (e.g., server-to-server) allow
+        if (!origin)
+            return callback(null, true);
+        // If FRONTEND_URL is set, only allow that origin
+        if (FRONTEND_URL) {
+            return callback(null, origin === FRONTEND_URL);
+        }
+        // Otherwise allow any origin (use caution in production)
+        return callback(null, true);
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
     allowedHeaders: ['Content-Type', 'Authorization', 'x-csrf-token', 'x-sudo-token', 'Accept', 'Origin', 'X-Requested-With'],
     credentials: true,
     maxAge: 86400 // Cache preflight for 24h
 };
 app.use((0, cors_1.default)(corsOptions));
-// Handle OPTIONS preflight for all routes (Express 5 / path-to-regexp v8 compatible)
-app.options('/{*path}', (0, cors_1.default)(corsOptions));
+// Handle OPTIONS preflight for all routes
+app.options('*', (0, cors_1.default)(corsOptions));
+// Ensure CORS headers are set for any responses even if some middleware short-circuits
+app.use((req, res, next) => {
+    const origin = FRONTEND_URL || req.header('Origin') || '*';
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-csrf-token, x-sudo-token, Accept, Origin, X-Requested-With');
+    if (req.method === 'OPTIONS')
+        return res.sendStatus(204);
+    next();
+});
 app.use(express_1.default.json({ limit: '50mb' }));
 app.use(express_1.default.urlencoded({ extended: true, limit: '50mb' }));
 const PORT = process.env.PORT || 5000;
