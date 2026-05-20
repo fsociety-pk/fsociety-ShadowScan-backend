@@ -17,14 +17,19 @@ initKeyRotationCron();
 const app = express();
 
 const FRONTEND_URL = process.env.FRONTEND_URL || process.env.FRONTEND_ORIGIN || '';
+const FRONTEND_ORIGINS = process.env.FRONTEND_ORIGINS || FRONTEND_URL || '';
+const allowedOrigins = FRONTEND_ORIGINS
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 const corsOptions = {
   origin: (origin: any, callback: any) => {
-    // If no origin (e.g., server-to-server) allow
+    // Allow server-to-server or tools without Origin header
     if (!origin) return callback(null, true);
-    // If FRONTEND_URL is set, only allow that origin
-    if (FRONTEND_URL) {
-      return callback(null, origin === FRONTEND_URL);
+    // If allowedOrigins provided, only allow exact matches
+    if (allowedOrigins.length > 0) {
+      return callback(null, allowedOrigins.includes(origin));
     }
     // Otherwise allow any origin (use caution in production)
     return callback(null, true);
