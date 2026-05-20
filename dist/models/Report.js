@@ -44,15 +44,16 @@ const ReportSchema = new mongoose_1.Schema({
     generatedBy: { type: mongoose_1.Schema.Types.ObjectId, ref: 'User', required: true },
     entities: [
         {
-            type: { type: String, enum: ['email', 'phone', 'username', 'domain', 'person', 'organization'] },
+            type: { type: String, enum: ['email', 'phone', 'username', 'domain', 'person', 'organization', 'ip', 'location'] },
             value: String,
             confidence: { type: Number, min: 0, max: 100 },
         },
     ],
     riskLevel: { type: String, enum: ['Low', 'Medium', 'High', 'Critical'], default: 'Medium' },
     findings_count: { type: Number, default: 0 },
+    visualReport: { type: mongoose_1.Schema.Types.Mixed, default: null },
+    syntheticDataUsed: { type: Boolean, default: false },
 }, { timestamps: true });
-// Index for efficient lookups
 ReportSchema.index({ caseId: 1, createdAt: -1 });
 ReportSchema.index({ generatedBy: 1, createdAt: -1 });
 exports.default = mongoose_1.default.model('Report', ReportSchema);

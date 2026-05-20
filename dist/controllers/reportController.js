@@ -467,7 +467,7 @@ const parseBulletList = (lines) => lines
     .slice(0, 8);
 // Generate AI Report
 const generateReport = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a;
+    var _a, _b, _c;
     try {
         const { caseId, template = 'corporate' } = req.body;
         const userId = (_a = req.user) === null || _a === void 0 ? void 0 : _a.id;
@@ -477,129 +477,73 @@ const generateReport = (req, res) => __awaiter(void 0, void 0, void 0, function*
         if (!['fbi', 'corporate'].includes(template)) {
             return res.status(400).json({ message: 'template must be "fbi" or "corporate"' });
         }
-        // Fetch case and findings
-        const caseDoc = yield Case_1.default.findById(caseId).populate('findings');
+        const caseDoc = yield Case_1.default.findById(caseId);
         if (!caseDoc) {
             return res.status(404).json({ message: 'Case not found' });
         }
-        let findings = yield Finding_1.default.find({ caseId }).lean();
-        let syntheticDataUsed = false;
-        if (findings.length === 0) {
-            findings = buildSyntheticFindingsFromCase(caseDoc);
-            syntheticDataUsed = true;
+        // The raw findings text is stored in the case description (set from rawFindings on NewCase submit)
+        const rawFindings = [
+            caseDoc.get('description') || '',
+            (caseDoc.get('clues') || []).join('\n'),
+            caseDoc.get('notes') || '',
+        ].filter(Boolean).join('\n').trim();
+        if (!rawFindings) {
+            return res.status(400).json({ message: 'No intelligence data found for this case. Please add raw findings first.' });
         }
-        if (findings.length === 0) {
-            return res.status(400).json({ message: 'No analyzable intelligence found for this case' });
-        }
-        // Format findings for AI
-        const formattedFindings = formatFindingsForAI(findings);
-        const extractedEntities = extractEntitiesFromFindings(findings);
-        const avgConfidence = Math.round(findings.reduce((sum, finding) => sum + (finding.confidence || 70), 0) / findings.length);
-        const confidenceScore = Math.max(20, Math.min(100, avgConfidence));
-        const riskLevel = confidenceToRisk(confidenceScore);
-        const visualReport = buildVisualReport(caseDoc, extractedEntities, riskLevel, confidenceScore, findings.length);
-        // Create AI prompt based on template
-        let systemPrompt = `You are a cybersecurity intelligence analyst specializing in OSINT investigations.`;
-        let userPrompt = '';
-        if (template === 'fbi') {
-            systemPrompt += ` Generate a professional FBI-style intelligence report with concise, structured sections and relationship-focused analysis.`;
-            userPrompt = `Convert the following OSINT investigation findings into a formal law enforcement intelligence report.
-
-**Case Title**: ${caseDoc.title}
-**Case Description**: ${caseDoc.description}
-
-**Investigation Findings**:
-${formattedFindings}
-
-**Report Structure Required**:
-1. **Executive Summary** - 2-3 sentence overview
-2. **Subject Identification** - All identified entities (emails, usernames, phone numbers, domains)
-3. **Investigation Timeline** - Chronological discovery sequence
-4. **Relationships & Connections** - Identified correlations between entities
-5. **Risk Assessment** - Overall risk level (Low/Medium/High/Critical)
-6. **Recommendations** - Next investigative steps
-7. **Sources** - List all API sources used
-8. **Relationship Matrix** - Table with Source Entity, Related Entity, Relationship Type, Confidence
-
-Format requirements:
-- Use Markdown headings and short bullet points.
-- Include at least one table for relationship mapping.
-- Add color semantics using labels like [CRITICAL], [HIGH], [MEDIUM], [LOW] where relevant.
-- Keep tone suitable for law enforcement briefing.`;
-        }
-        else {
-            systemPrompt += ` Generate a professional corporate intelligence report with readable headings, visual-style structure, and clear bullet points.`;
-            userPrompt = `Convert the following OSINT investigation findings into a corporate intelligence report.
-
-**Case Title**: ${caseDoc.title}
-**Case Description**: ${caseDoc.description}
-
-**Investigation Findings**:
-${formattedFindings}
-
-**Report Structure Required**:
-1. **Overview** - Brief summary of investigation
-2. **Key Findings** - Primary discoveries with confidence levels
-3. **Entity Summary** - All identified entities and their significance
-4. **Data Exposure Assessment** - What personal/corporate data was exposed
-5. **Risk Level** - Overall risk rating (Low/Medium/High/Critical)
-6. **Discovery Timeline** - When data/entities were discovered
-7. **Business Impact** - Potential implications
-8. **Remediation Steps** - Recommended actions
-9. **References** - Data sources (APIs and discovery methods)
-10. **Relationship Matrix** - Table with Entity A, Entity B, Relationship, Confidence
-
-Format requirements:
-- Use Markdown headings and concise bullets.
-- Include at least one table for relationships.
-- Use labeled risk tags like [CRITICAL], [HIGH], [MEDIUM], [LOW].
-- Keep tone suitable for executive briefings.`;
-        }
-        // Call Gemini
-        let reportContent = buildFallbackMarkdown(caseDoc, template, findings.length, riskLevel, visualReport);
-        if (process.env.GEMINI_API_KEY) {
-            try {
-                const aiText = yield (0, reportService_1.generateAIReport)(systemPrompt, caseDoc, findings);
-                if (aiText.trim().length > 80)
-                    reportContent = aiText;
-            }
-            catch (aiError) {
-                console.error('Gemini generation failed, using fallback report:', (aiError === null || aiError === void 0 ? void 0 : aiError.message) || aiError);
+        const targetProfile = caseDoc.get('targetProfile') || {};
+        console.log(`[Report] Calling Gemini for case: ${caseDoc.get('title')}, findings length: ${rawFindings.length}`);
+        // Call Gemini with raw findings
+        const { markdownContent, visualReport } = yield (0, reportService_1.generateFullReport)(caseDoc.get('title'), rawFindings, targetProfile);
+        const syntheticDataUsed = !(yield Finding_1.default.countDocuments({ caseId }));
+        // Determine final risk level
+        const riskMatch = markdownContent.match(/risk[^a-z]*(low|medium|high|critical)/i);
+        const finalRiskLevel = normalizeRiskLevel(visualReport.riskLevel || (riskMatch === null || riskMatch === void 0 ? void 0 : riskMatch[1]) || 'Medium');
+        // Build flat entities list for backward compat
+        const entityTypes = ['email', 'phone', 'username', 'domain', 'person', 'organization', 'ip', 'location'];
+        const entities = [];
+        if (visualReport.entitiesByType) {
+            for (const [groupKey, values] of Object.entries(visualReport.entitiesByType)) {
+                const lk = groupKey.toLowerCase();
+                let eType = 'username';
+                if (lk.includes('email'))
+                    eType = 'email';
+                else if (lk.includes('phone') || lk.includes('number'))
+                    eType = 'phone';
+                else if (lk.includes('domain'))
+                    eType = 'domain';
+                else if (lk.includes('ip') || lk.includes('address'))
+                    eType = 'ip';
+                else if (lk.includes('location') || lk.includes('city'))
+                    eType = 'location';
+                else if (lk.includes('name') || lk.includes('alias') || lk.includes('associate'))
+                    eType = 'person';
+                else if (lk.includes('org') || lk.includes('company') || lk.includes('employer'))
+                    eType = 'organization';
+                values.forEach(v => entities.push({ type: eType, value: v, confidence: visualReport.confidenceScore || 75 }));
             }
         }
-        // Extract key entities and risk level from report content
-        const entities = extractedEntities
-            .filter((entity) => ['email', 'username', 'phone', 'domain', 'person', 'organization'].includes(entity.type))
-            .map((entity) => ({
-            type: entity.type === 'person' ? 'person' : entity.type === 'organization' ? 'organization' : entity.type,
-            value: entity.value,
-            confidence: entity.confidence,
-        }));
-        const riskMatch = reportContent.match(/risk[^a-z]*(low|medium|high|critical)/i);
-        const contentRisk = normalizeRiskLevel(riskMatch === null || riskMatch === void 0 ? void 0 : riskMatch[1]);
-        const finalRiskLevel = contentRisk || riskLevel;
-        const summary = reportContent.split('\n').slice(0, 3).join('\n').slice(0, 240);
-        // Save report to database
+        const summary = markdownContent.replace(/#+.*\n/g, '').split('\n').filter(Boolean).slice(0, 3).join(' ').slice(0, 240);
+        // Save report
         const report = new Report_1.default({
             caseId,
             template,
-            title: `${template === 'fbi' ? 'Law Enforcement' : 'Corporate'} Intelligence Report - ${caseDoc.title}`,
-            content: reportContent,
+            title: `${template === 'fbi' ? 'Law Enforcement' : 'Corporate'} Intelligence Report — ${caseDoc.get('title')}`,
+            content: markdownContent,
             summary,
             generatedBy: userId,
             entities,
             riskLevel: finalRiskLevel,
-            findings_count: findings.length,
+            findings_count: (((_c = (_b = visualReport.relationshipGraph) === null || _b === void 0 ? void 0 : _b.nodes) === null || _c === void 0 ? void 0 : _c.length) || 1) - 1,
+            visualReport,
+            syntheticDataUsed,
         });
         yield report.save();
-        // Update case with report reference
         yield Case_1.default.findByIdAndUpdate(caseId, {
             reportGenerated: true,
             reportTemplate: template,
             lastReportId: report._id,
         });
-        // Log activity
-        yield (0, logActivity_1.logUserActivity)(req, 'intelligence_report_generated', `Generated ${template} report for case: ${caseDoc.title}`, caseId);
+        yield (0, logActivity_1.logUserActivity)(req, 'intelligence_report_generated', `Generated ${template} report for case: ${caseDoc.get('title')}`, caseId);
         return res.status(201).json({
             success: true,
             report: {
@@ -607,11 +551,11 @@ Format requirements:
                 caseId,
                 template,
                 title: report.title,
-                content: reportContent,
+                content: markdownContent,
                 summary,
                 entities,
                 riskLevel: finalRiskLevel,
-                findings_count: findings.length,
+                findings_count: report.findings_count,
                 generatedAt: report.generatedAt,
                 visualReport,
                 syntheticDataUsed,
@@ -648,14 +592,28 @@ const getReport = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     }
 });
 exports.getReport = getReport;
-// Get Case Reports
+// Get Case Reports (includes visualReport from DB)
 const getCaseReports = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { caseId } = req.params;
-        const reports = yield Report_1.default.find({ caseId }).sort({ createdAt: -1 }).limit(10);
+        const reports = yield Report_1.default.find({ caseId }).sort({ createdAt: -1 }).limit(10).lean();
+        const serialized = reports.map((r) => ({
+            id: r._id,
+            caseId: r.caseId,
+            template: r.template,
+            title: r.title,
+            content: r.content,
+            summary: r.summary,
+            entities: r.entities,
+            riskLevel: r.riskLevel,
+            findings_count: r.findings_count,
+            generatedAt: r.generatedAt || r.createdAt,
+            visualReport: r.visualReport || null,
+            syntheticDataUsed: r.syntheticDataUsed || false,
+        }));
         return res.status(200).json({
             success: true,
-            reports,
+            reports: serialized,
         });
     }
     catch (error) {
