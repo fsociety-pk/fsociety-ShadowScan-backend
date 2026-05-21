@@ -9,10 +9,22 @@ dotenv.config();
 getJwtSecret();
 
 // Connect to Database
-connectDB();
-
-// Initialize Crons
-initKeyRotationCron();
+const startServer = async () => {
+  try {
+    await connectDB();
+    
+    // Initialize Crons
+    initKeyRotationCron();
+    
+    const PORT = process.env.PORT || 5000;
+    app.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+};
 
 const app = express();
 
@@ -125,7 +137,12 @@ app.get('/', (req, res) => {
 });
 
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'Fsociety ShadowScan API is running' });
+  const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+  res.json({ 
+    status: 'ok', 
+    message: 'Fsociety ShadowScan API is running',
+    database: dbStatus 
+  });
 });
 
 app.use('/api/auth', authRoutes);
@@ -142,6 +159,5 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/osint-analyst', osintAnalystRoutes);
 app.use('/api/chat', chatRoutes);
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+
+startServer();
