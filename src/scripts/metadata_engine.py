@@ -375,5 +375,20 @@ if __name__ == "__main__":
         print(json.dumps({"status": "error", "message": "No file provided"}))
         sys.exit(1)
     
-    engine = MetadataForensicEngine(sys.argv[1])
-    print(json.dumps(engine.run(), indent=2))
+    import traceback
+
+    file_arg = sys.argv[1]
+    try:
+        engine = MetadataForensicEngine(file_arg)
+        result = engine.run()
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    except Exception as e:
+        tb = traceback.format_exc()
+        error_payload = {
+            "status": "error",
+            "message": str(e),
+            "trace": tb
+        }
+        # Ensure we always emit valid JSON for the controller to parse
+        print(json.dumps(error_payload, indent=2, ensure_ascii=False))
+        sys.exit(1)

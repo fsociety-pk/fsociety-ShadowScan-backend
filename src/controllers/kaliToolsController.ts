@@ -76,7 +76,20 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
         const response = await axios.get(`https://api.sherlock.xyz/search/${username}`, {
           timeout: 10000
         });
-        results.platforms = Array.isArray(response.data) ? response.data.map(normalizePlatform) : [];
+        // API may return array or object keyed by platform
+        if (Array.isArray(response.data)) {
+          results.platforms = response.data.map(normalizePlatform);
+        } else if (response.data && typeof response.data === 'object') {
+          // Convert { platform: {...} } to normalized array
+          const arr: any[] = [];
+          for (const [k, v] of Object.entries(response.data)) {
+            const item = (v as any) || {};
+            arr.push(normalizePlatform({ platform: k, url: item.url || item.profile || item.link || '', status: item.status || (item.exists ? 'found' : undefined), message: item.message || item.note || '' }));
+          }
+          results.platforms = arr;
+        } else {
+          results.platforms = [];
+        }
         results.method = 'API-Fallback';
       } catch (apiError) {
         return res.status(503).json({ 
@@ -157,13 +170,15 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    const foundCount = results.platforms.filter((p: any) => p.found).length;
+    const foundCount = results.platforms.filter((p: any) => p.status === 'found').length;
+    const totalChecked = results.platforms.length || 0;
+    const successRate = totalChecked > 0 ? `${((foundCount / totalChecked) * 100).toFixed(2)}%` : '0%';
     res.json({
       ...results,
       summary: {
-        totalPlatformsChecked: results.platforms.length,
+        totalPlatformsChecked: totalChecked,
         platformsFound: foundCount,
-        successRate: `${((foundCount / results.platforms.length) * 100).toFixed(2)}%`
+        successRate
       }
     });
   } catch (error) {

@@ -114,3 +114,32 @@ Deploy frontend from `main`.
 ```bash
 pm2 logs shadowscan-backend
 ```
+
+## 9. Python forensic engine dependencies
+
+The metadata extraction engine (`metadata_engine.py`) depends on several Python packages. Install them into the system Python or a virtual environment before running the server to avoid runtime errors (e.g. ModuleNotFoundError: No module named 'piexif').
+
+From the backend folder run:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+If you prefer system-wide installation:
+
+```bash
+python3 -m pip install --user -r requirements.txt
+```
+
+### ExifTool (optional fallback)
+
+If the forensic engine fails to extract metadata (missing Python packages or unsupported file types), the backend falls back to the `exiftool` system utility. To install on Debian/Ubuntu:
+
+```bash
+sudo apt-get update && sudo apt-get install -y libimage-exiftool-perl
+```
+
+Ensure `exiftool` is available on the server PATH so the fallback can execute.
+
