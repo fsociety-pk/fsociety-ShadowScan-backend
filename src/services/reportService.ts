@@ -9,6 +9,22 @@ const candidateModels = [
     'gemini-1.5-pro',
 ].filter((model): model is string => Boolean(model));
 
+const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> => {
+    return new Promise<T>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+        promise.then(
+            (value) => {
+                clearTimeout(timeout);
+                resolve(value);
+            },
+            (error) => {
+                clearTimeout(timeout);
+                reject(error);
+            }
+        );
+    });
+};
+
 export interface VisualReportFromAI {
     target: string;
     summary: string;
@@ -232,11 +248,12 @@ export const generateFullReport = async (
 
     const prompt = buildPrompt(caseTitle, rawFindings, targetProfile);
     let lastError: unknown;
+    const generationTimeoutMs = Number(process.env.GEMINI_TIMEOUT_MS || 25000);
 
     for (const modelName of candidateModels) {
         try {
             const model = genAI.getGenerativeModel({ model: modelName });
-            const result = await model.generateContent({
+            const result = await withTimeout(model.generateContent({
                 contents: [
                     { role: 'user', parts: [{ text: GEMINI_SYSTEM_PROMPT + '\n\n' + prompt }] }
                 ],
@@ -245,7 +262,7 @@ export const generateFullReport = async (
                     maxOutputTokens: 8192,
                     responseMimeType: 'application/json',
                 },
-            });
+            }), generationTimeoutMs, `Gemini generation timed out after ${generationTimeoutMs}ms`);
 
             const responseText = result.response.text().trim();
             if (!responseText) {

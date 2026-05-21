@@ -18,6 +18,18 @@ const candidateModels = [
     'gemini-1.5-flash',
     'gemini-1.5-pro',
 ].filter((model) => Boolean(model));
+const withTimeout = (promise, timeoutMs, message) => {
+    return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+        promise.then((value) => {
+            clearTimeout(timeout);
+            resolve(value);
+        }, (error) => {
+            clearTimeout(timeout);
+            reject(error);
+        });
+    });
+};
 const TYPE_COLORS = {
     target: '#0ea5e9',
     person: '#8b5cf6',
@@ -233,10 +245,11 @@ const generateFullReport = (caseTitle, rawFindings, targetProfile) => __awaiter(
     }
     const prompt = buildPrompt(caseTitle, rawFindings, targetProfile);
     let lastError;
+    const generationTimeoutMs = Number(process.env.GEMINI_TIMEOUT_MS || 25000);
     for (const modelName of candidateModels) {
         try {
             const model = genAI.getGenerativeModel({ model: modelName });
-            const result = yield model.generateContent({
+            const result = yield withTimeout(model.generateContent({
                 contents: [
                     { role: 'user', parts: [{ text: GEMINI_SYSTEM_PROMPT + '\n\n' + prompt }] }
                 ],
@@ -245,7 +258,7 @@ const generateFullReport = (caseTitle, rawFindings, targetProfile) => __awaiter(
                     maxOutputTokens: 8192,
                     responseMimeType: 'application/json',
                 },
-            });
+            }), generationTimeoutMs, `Gemini generation timed out after ${generationTimeoutMs}ms`);
             const responseText = result.response.text().trim();
             if (!responseText) {
                 lastError = new Error(`Empty response from ${modelName}`);

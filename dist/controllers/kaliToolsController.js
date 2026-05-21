@@ -76,6 +76,29 @@ const sherlockSearch = (req, res) => __awaiter(void 0, void 0, void 0, function*
         return res.status(400).json({ message: 'Username required' });
     }
     try {
+        const normalizeStatus = (item) => {
+            const status = String((item === null || item === void 0 ? void 0 : item.status) || '').toLowerCase();
+            const message = String((item === null || item === void 0 ? void 0 : item.message) || (item === null || item === void 0 ? void 0 : item.detail) || (item === null || item === void 0 ? void 0 : item.output) || '').toLowerCase();
+            if (status === 'found' || (item === null || item === void 0 ? void 0 : item.found) === true)
+                return 'found';
+            if (status === 'rate_limit' || message.includes('rate limit') || message.includes('429'))
+                return 'rate_limit';
+            if (status === 'error' || (item === null || item === void 0 ? void 0 : item.error) || message.includes('error'))
+                return 'error';
+            return 'not_found';
+        };
+        const normalizePlatform = (item) => {
+            const platformName = (item === null || item === void 0 ? void 0 : item.platform) || (item === null || item === void 0 ? void 0 : item.site) || (item === null || item === void 0 ? void 0 : item.name) || (item === null || item === void 0 ? void 0 : item.title) || 'Unknown Platform';
+            const url = (item === null || item === void 0 ? void 0 : item.url) || (item === null || item === void 0 ? void 0 : item.link) || (item === null || item === void 0 ? void 0 : item.profile) || '';
+            const status = normalizeStatus(item);
+            return {
+                platform: platformName,
+                url,
+                status,
+                statusCode: typeof (item === null || item === void 0 ? void 0 : item.statusCode) === 'number' ? item.statusCode : status === 'found' ? 200 : status === 'rate_limit' ? 429 : status === 'error' ? 500 : 404,
+                message: (item === null || item === void 0 ? void 0 : item.message) || (item === null || item === void 0 ? void 0 : item.detail) || (item === null || item === void 0 ? void 0 : item.note) || '',
+            };
+        };
         const results = {
             tool: 'Sherlock',
             username,
@@ -90,7 +113,7 @@ const sherlockSearch = (req, res) => __awaiter(void 0, void 0, void 0, function*
                 const response = yield axios_1.default.get(`https://api.sherlock.xyz/search/${username}`, {
                     timeout: 10000
                 });
-                results.platforms = response.data || [];
+                results.platforms = Array.isArray(response.data) ? response.data.map(normalizePlatform) : [];
                 results.method = 'API-Fallback';
             }
             catch (apiError) {
@@ -102,22 +125,34 @@ const sherlockSearch = (req, res) => __awaiter(void 0, void 0, void 0, function*
         else {
             // Use local Sherlock tool
             try {
-                const { stdout } = yield execPromise(`sherlock "${username}" --timeout 10 2>/dev/null || echo "completed"`);
-                const platforms = [];
+                const { stdout } = yield execPromise(`sherlock "${username}" --timeout 10 --print-all --no-color --no-txt 2>/dev/null || echo "completed"`);
+                const platformMap = new Map();
                 const lines = stdout.split('\n');
                 for (const line of lines) {
-                    if (line.includes('[+] ')) {
-                        const match = line.match(/\[\+\]\s(.*?):\s(.*)/);
-                        if (match && match.length >= 3) {
-                            platforms.push({
-                                platform: match[1].trim(),
-                                found: true,
-                                url: match[2].trim(),
-                                statusCode: 200
-                            });
+                    const trimmed = line.trim();
+                    if (!trimmed)
+                        continue;
+                    if (/^\[(\+|-|!|\*)\]/.test(trimmed)) {
+                        const match = trimmed.match(/^\[([+\-!\*])\]\s*(.*?):\s*(.*)$/);
+                        if (match && match.length >= 4) {
+                            const flag = (match[1] || '').trim();
+                            const platform = (match[2] || '').trim();
+                            const detail = (match[3] || '').trim();
+                            const status = flag === '+' ? 'found' : flag === '!' ? 'rate_limit' : flag === '*' ? 'error' : 'not_found';
+                            const normalized = {
+                                platform,
+                                found: status === 'found',
+                                status,
+                                url: status === 'found' ? detail : '',
+                                statusCode: status === 'found' ? 200 : status === 'rate_limit' ? 429 : status === 'error' ? 500 : 404,
+                                message: detail,
+                            };
+                            if (platform)
+                                platformMap.set(platform.toLowerCase(), normalized);
                         }
                     }
                 }
+                const platforms = Array.from(platformMap.values()).map(normalizePlatform);
                 // Clean up Sherlock report file from disk to keep workspace pristine
                 const reportPath = path_1.default.join(process.cwd(), `${username}.txt`);
                 if (fs_1.default.existsSync(reportPath)) {
