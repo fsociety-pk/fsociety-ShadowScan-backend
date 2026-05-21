@@ -564,19 +564,25 @@ const extractMetadata = async (req, res) => {
     let outputData = "";
     let errorData = "";
     let isFinished = false;
+    const WATCHDOG_MS = parseInt(process.env.METADATA_TIMEOUT_MS || "") || 6e4;
     const timeout = setTimeout(() => {
       if (!isFinished) {
         isFinished = true;
-        pythonProcess.kill();
+        try {
+          pythonProcess.kill();
+        } catch (e) {
+        }
         cleanup();
-        console.error(`[METADATA_OSINT] Timeout (30s) reached for: ${filename}`);
-        res.status(504).json({
-          status: "error",
-          message: "Forensic extraction timed out (30s max)",
-          error: "TIMEOUT"
-        });
+        console.error(`[METADATA_OSINT] Timeout (${WATCHDOG_MS}ms) reached for: ${filename}`);
+        if (!res.headersSent) {
+          res.status(504).json({
+            status: "error",
+            message: `Forensic extraction timed out (${WATCHDOG_MS}ms max)`,
+            error: "TIMEOUT"
+          });
+        }
       }
-    }, 3e4);
+    }, WATCHDOG_MS);
     pythonProcess.stdout.on("data", (data) => {
       outputData += data.toString();
     });
@@ -591,11 +597,19 @@ const extractMetadata = async (req, res) => {
       const extractionTime = Date.now() - startTime;
       if (code !== 0) {
         console.error(`[METADATA_OSINT] Process crash [Code ${code}]: ${errorData}`);
-        res.status(500).json({
-          status: "error",
-          message: "Forensic engine crash",
-          error: errorData
-        });
+        try {
+          const parsed = JSON.parse(outputData || "{}");
+          if (!res.headersSent) return res.status(200).json(parsed);
+        } catch (parseErr) {
+          try {
+            const exifOut = await execPromise(`exiftool -json -G1 -n "${filePath}"`);
+            const parsedExif = JSON.parse(exifOut.stdout || "[]");
+            const exifResult = parsedExif[0] || { status: "error", message: "ExifTool returned empty" };
+            if (!res.headersSent) return res.status(200).json({ status: "partial", exif: exifResult, engine_error: errorData });
+          } catch (exifErr) {
+            if (!res.headersSent) return res.status(500).json({ status: "error", message: "Forensic engine crash and ExifTool fallback failed", error: errorData });
+          }
+        }
         return;
       }
       try {

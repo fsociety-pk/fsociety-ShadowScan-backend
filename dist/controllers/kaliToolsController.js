@@ -90,7 +90,18 @@ const sherlockSearch = async (req, res) => {
         const response = await import_axios.default.get(`https://api.sherlock.xyz/search/${username}`, {
           timeout: 1e4
         });
-        results.platforms = Array.isArray(response.data) ? response.data.map(normalizePlatform) : [];
+        if (Array.isArray(response.data)) {
+          results.platforms = response.data.map(normalizePlatform);
+        } else if (response.data && typeof response.data === "object") {
+          const arr = [];
+          for (const [k, v] of Object.entries(response.data)) {
+            const item = v || {};
+            arr.push(normalizePlatform({ platform: k, url: item.url || item.profile || item.link || "", status: item.status || (item.exists ? "found" : void 0), message: item.message || item.note || "" }));
+          }
+          results.platforms = arr;
+        } else {
+          results.platforms = [];
+        }
         results.method = "API-Fallback";
       } catch (apiError) {
         return res.status(503).json({
@@ -100,7 +111,9 @@ const sherlockSearch = async (req, res) => {
     } else {
       try {
         const { stdout } = await execPromise(
-          `sherlock "${username}" --timeout 10 --print-all --no-color --no-txt 2>/dev/null || echo "completed"`
+          `sherlock "${username}" --print-all 2>/dev/null || true`,
+          { maxBuffer: 10 * 1024 * 1024, timeout: 3e5 }
+          // 5-min cap, 10 MB buffer
         );
         const platformMap = /* @__PURE__ */ new Map();
         const lines = stdout.split("\n");
@@ -108,21 +121,22 @@ const sherlockSearch = async (req, res) => {
           const trimmed = line.trim();
           if (!trimmed) continue;
           if (/^\[(\+|-|!|\*)\]/.test(trimmed)) {
-            const match = trimmed.match(/^\[([+\-!\*])\]\s*(.*?):\s*(.*)$/);
+            const match = trimmed.match(/^\[([+\-!*])\]\s*(.*?):\s*(.*)$/);
             if (match && match.length >= 4) {
               const flag = (match[1] || "").trim();
               const platform = (match[2] || "").trim();
               const detail = (match[3] || "").trim();
               const status = flag === "+" ? "found" : flag === "!" ? "rate_limit" : flag === "*" ? "error" : "not_found";
-              const normalized = {
-                platform,
-                found: status === "found",
-                status,
-                url: status === "found" ? detail : "",
-                statusCode: status === "found" ? 200 : status === "rate_limit" ? 429 : status === "error" ? 500 : 404,
-                message: detail
-              };
-              if (platform) platformMap.set(platform.toLowerCase(), normalized);
+              if (platform) {
+                platformMap.set(platform.toLowerCase(), {
+                  platform,
+                  found: status === "found",
+                  status,
+                  url: status === "found" ? detail : "",
+                  statusCode: status === "found" ? 200 : status === "rate_limit" ? 429 : status === "error" ? 500 : 404,
+                  message: detail
+                });
+              }
             }
           }
         }
@@ -131,14 +145,14 @@ const sherlockSearch = async (req, res) => {
         if (import_fs.default.existsSync(reportPath)) {
           try {
             import_fs.default.unlinkSync(reportPath);
-          } catch (e) {
-            console.error("Failed to delete sherlock report file:", e);
+          } catch (_) {
           }
         }
         results.platforms = platforms;
         results.method = "Local-Sherlock";
       } catch (execError) {
-        return res.status(500).json({ message: "Sherlock execution failed" });
+        console.error("Sherlock exec error:", execError);
+        return res.status(500).json({ message: "Sherlock execution failed. Make sure sherlock is installed (pip install sherlock-project)." });
       }
     }
     (0, import_logActivity.logUserActivity)(req, "sherlock_search", "Sherlock Username Search", { target: username });
@@ -159,13 +173,15 @@ const sherlockSearch = async (req, res) => {
         console.error("Error saving sherlock finding:", findingError);
       }
     }
-    const foundCount = results.platforms.filter((p) => p.found).length;
+    const foundCount = results.platforms.filter((p) => p.status === "found").length;
+    const totalChecked = results.platforms.length || 0;
+    const successRate = totalChecked > 0 ? `${(foundCount / totalChecked * 100).toFixed(2)}%` : "0%";
     res.json({
       ...results,
       summary: {
-        totalPlatformsChecked: results.platforms.length,
+        totalPlatformsChecked: totalChecked,
         platformsFound: foundCount,
-        successRate: `${(foundCount / results.platforms.length * 100).toFixed(2)}%`
+        successRate
       }
     });
   } catch (error) {

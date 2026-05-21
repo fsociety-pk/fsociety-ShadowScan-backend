@@ -24,6 +24,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var import_express = __toESM(require("express"));
 var import_cors = __toESM(require("cors"));
 var import_dotenv = __toESM(require("dotenv"));
+var import_mongoose = __toESM(require("mongoose"));
 var import_db = __toESM(require("./config/db"));
 var import_keyRotation = require("./crons/keyRotation");
 var import_env = require("./config/env");
@@ -41,8 +42,19 @@ var import_osintAnalystRoutes = __toESM(require("./routes/osintAnalystRoutes"));
 var import_chatRoutes = __toESM(require("./routes/chatRoutes"));
 import_dotenv.default.config();
 (0, import_env.getJwtSecret)();
-(0, import_db.default)();
-(0, import_keyRotation.initKeyRotationCron)();
+const startServer = async () => {
+  try {
+    await (0, import_db.default)();
+    (0, import_keyRotation.initKeyRotationCron)();
+    const PORT2 = process.env.PORT || 5e3;
+    app.listen(PORT2, () => {
+      console.log(`\u{1F680} Server running on port ${PORT2}`);
+    });
+  } catch (error) {
+    console.error("Failed to start server:", error);
+    process.exit(1);
+  }
+};
 const app = (0, import_express.default)();
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://www.shadowscan.me",
@@ -117,7 +129,12 @@ app.get("/", (req, res) => {
   res.send("<h1>Fsociety ShadowScan API</h1><p>Status: ONLINE</p><p>Use the frontend to access the dashboard.</p>");
 });
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", message: "Fsociety ShadowScan API is running" });
+  const dbStatus = import_mongoose.default.connection.readyState === 1 ? "connected" : "disconnected";
+  res.json({
+    status: "ok",
+    message: "Fsociety ShadowScan API is running",
+    database: dbStatus
+  });
 });
 app.use("/api/auth", import_authRoutes.default);
 app.use("/api/cases", import_caseRoutes.default);
@@ -131,6 +148,4 @@ app.use("/api/intelligence", import_intelligenceReportRoutes.default);
 app.use("/api/admin", import_admin.default);
 app.use("/api/osint-analyst", import_osintAnalystRoutes.default);
 app.use("/api/chat", import_chatRoutes.default);
-app.listen(PORT, () => {
-  console.log(`\u{1F680} Server running on port ${PORT}`);
-});
+startServer();

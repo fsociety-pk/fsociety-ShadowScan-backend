@@ -3,15 +3,44 @@ import json
 import os
 import subprocess
 import hashlib
-import requests
 from datetime import datetime
-from PIL import Image
-import piexif
-from PyPDF2 import PdfReader
-import docx
-import openpyxl
-import pptx
-import eyed3
+
+# Optional third-party imports — wrapped so the engine degrades gracefully
+# if a package is absent instead of crashing immediately.
+try:
+    import requests as _requests
+except ImportError:
+    _requests = None  # type: ignore
+
+try:
+    from PIL import Image as _PIL_Image
+except ImportError:
+    _PIL_Image = None  # type: ignore
+
+try:
+    from PyPDF2 import PdfReader
+except ImportError:
+    PdfReader = None  # type: ignore
+
+try:
+    import docx as _docx
+except ImportError:
+    _docx = None  # type: ignore
+
+try:
+    import openpyxl as _openpyxl
+except ImportError:
+    _openpyxl = None  # type: ignore
+
+try:
+    import pptx as _pptx
+except ImportError:
+    _pptx = None  # type: ignore
+
+try:
+    import eyed3 as _eyed3
+except ImportError:
+    _eyed3 = None  # type: ignore
 
 # Support for non-ASCII metadata
 sys.stdout.reconfigure(encoding='utf-8')
@@ -55,10 +84,12 @@ class MetadataForensicEngine:
             return {}
 
     def reverse_geocode(self, lat, lon):
+        if _requests is None:
+            return None
         try:
             headers = {"User-Agent": "Fsociety-OSINT-Metadata-Tool/1.0 (Contact: osint@example.com)"}
             url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}"
-            response = requests.get(url, headers=headers, timeout=5)
+            response = _requests.get(url, headers=headers, timeout=5)
             self.tools_used.append("Nominatim API")
             if response.status_code == 200:
                 data = response.json()
@@ -238,18 +269,19 @@ class MetadataForensicEngine:
             "location": raw.get("IPTC:City")
         }
 
-        # Properties (Pillow)
-        try:
-            with Image.open(self.file_path) as img:
-                self.tools_used.append("Pillow")
-                results["image_properties"] = {
-                    "width": img.width,
-                    "height": img.height,
-                    "resolution": f"{img.info.get('dpi', (72, 72))[0]} x {img.info.get('dpi', (72, 72))[1]} DPI",
-                    "color_mode": img.mode,
-                    "bit_depth": 8 if img.mode in ['L', 'RGB', 'RGBA'] else 1 # Simple approximation
-                }
-        except: pass
+        # Properties (Pillow — optional)
+        if _PIL_Image is not None:
+            try:
+                with _PIL_Image.open(self.file_path) as img:
+                    self.tools_used.append("Pillow")
+                    results["image_properties"] = {
+                        "width": img.width,
+                        "height": img.height,
+                        "resolution": f"{img.info.get('dpi', (72, 72))[0]} x {img.info.get('dpi', (72, 72))[1]} DPI",
+                        "color_mode": img.mode,
+                        "bit_depth": 8 if img.mode in ['L', 'RGB', 'RGBA'] else 1
+                    }
+            except: pass
 
         results["device_fingerprint"] = {
             "device_type": "Smartphone" if camera.get("make") in ["Apple", "Samsung", "Google"] else "Camera",
@@ -262,82 +294,87 @@ class MetadataForensicEngine:
     def process_document(self, results, raw):
         props = {}
         if self.ext == '.pdf':
-            try:
-                reader = PdfReader(self.file_path)
-                self.tools_used.append("PyPDF2")
-                info = reader.metadata
-                props = {
-                    "author": info.author,
-                    "title": info.title,
-                    "subject": info.subject,
-                    "keywords": info.get('/Keywords'),
-                    "created": info.get('/CreationDate'),
-                    "modified": info.get('/ModDate'),
-                    "software": info.producer,
-                    "page_count": len(reader.pages),
-                    "encryption_status": "Encrypted" if reader.is_encrypted else "None"
-                }
-            except: pass
+            if PdfReader is not None:
+                try:
+                    reader = PdfReader(self.file_path)
+                    self.tools_used.append("PyPDF2")
+                    info = reader.metadata
+                    props = {
+                        "author": info.author,
+                        "title": info.title,
+                        "subject": info.subject,
+                        "keywords": info.get('/Keywords'),
+                        "created": info.get('/CreationDate'),
+                        "modified": info.get('/ModDate'),
+                        "software": info.producer,
+                        "page_count": len(reader.pages),
+                        "encryption_status": "Encrypted" if reader.is_encrypted else "None"
+                    }
+                except: pass
         elif self.ext == '.docx':
-            try:
-                doc = docx.Document(self.file_path)
-                self.tools_used.append("python-docx")
-                cp = doc.core_properties
-                props = {
-                    "author": cp.author,
-                    "title": cp.title,
-                    "created": cp.created.isoformat() if cp.created else None,
-                    "modified": cp.modified.isoformat() if cp.modified else None,
-                    "last_modified_by": cp.last_modified_by,
-                    "revision_count": cp.revision,
-                    "software": "Microsoft Word"
-                }
-            except: pass
+            if _docx is not None:
+                try:
+                    doc = _docx.Document(self.file_path)
+                    self.tools_used.append("python-docx")
+                    cp = doc.core_properties
+                    props = {
+                        "author": cp.author,
+                        "title": cp.title,
+                        "created": cp.created.isoformat() if cp.created else None,
+                        "modified": cp.modified.isoformat() if cp.modified else None,
+                        "last_modified_by": cp.last_modified_by,
+                        "revision_count": cp.revision,
+                        "software": "Microsoft Word"
+                    }
+                except: pass
         elif self.ext == '.xlsx':
-            try:
-                wb = openpyxl.load_workbook(self.file_path, read_only=True)
-                cp = wb.properties
-                props = {
-                    "author": cp.creator,
-                    "title": cp.title,
-                    "sheet_count": len(wb.sheetnames)
-                }
-            except: pass
+            if _openpyxl is not None:
+                try:
+                    wb = _openpyxl.load_workbook(self.file_path, read_only=True)
+                    cp = wb.properties
+                    props = {
+                        "author": cp.creator,
+                        "title": cp.title,
+                        "sheet_count": len(wb.sheetnames)
+                    }
+                except: pass
         elif self.ext == '.pptx':
-            try:
-                pres = pptx.Presentation(self.file_path)
-                cp = pres.core_properties
-                props = {
-                    "author": cp.author,
-                    "title": cp.title,
-                    "slide_count": len(pres.slides)
-                }
-            except: pass
-        
+            if _pptx is not None:
+                try:
+                    pres = _pptx.Presentation(self.file_path)
+                    cp = pres.core_properties
+                    props = {
+                        "author": cp.author,
+                        "title": cp.title,
+                        "slide_count": len(pres.slides)
+                    }
+                except: pass
+
         results["document_properties"] = props
         self.total_fields += len(props)
 
     def process_media(self, results, raw):
         if self.ext in ['.mp3', '.wav', '.flac', '.aac', '.ogg']:
             audio = {}
-            try:
-                self.tools_used.append("eyeD3")
-                af = eyed3.load(self.file_path)
-                if af and af.tag:
-                    audio = {
-                        "artist": af.tag.artist,
-                        "album": af.tag.album,
-                        "title": af.tag.title,
-                        "track_num": af.tag.track_num[0] if af.tag.track_num else None,
-                        "genre": str(af.tag.genre) if af.tag.genre else None
-                    }
-                audio.update({
-                    "bitrate": f"{int(raw.get('Audio:AudioBitrate', 0))/1000} kbps",
-                    "sample_rate": f"{raw.get('Audio:SampleRate')} Hz",
-                    "duration": raw.get("Composite:Duration"),
-                    "channels": "Stereo" if int(raw.get("Audio:AudioChannels", 0)) > 1 else "Mono"
-                })
-            except: pass
+            if _eyed3 is not None:
+                try:
+                    self.tools_used.append("eyeD3")
+                    af = _eyed3.load(self.file_path)
+                    if af and af.tag:
+                        audio = {
+                            "artist": af.tag.artist,
+                            "album": af.tag.album,
+                            "title": af.tag.title,
+                            "track_num": af.tag.track_num[0] if af.tag.track_num else None,
+                            "genre": str(af.tag.genre) if af.tag.genre else None
+                        }
+                    audio.update({
+                        "bitrate": f"{int(raw.get('Audio:AudioBitrate', 0))/1000} kbps",
+                        "sample_rate": f"{raw.get('Audio:SampleRate')} Hz",
+                        "duration": raw.get("Composite:Duration"),
+                        "channels": "Stereo" if int(raw.get("Audio:AudioChannels", 0)) > 1 else "Mono"
+                    })
+                except: pass
             results["audio_metadata"] = audio
         else:
             video = {}
@@ -375,5 +412,20 @@ if __name__ == "__main__":
         print(json.dumps({"status": "error", "message": "No file provided"}))
         sys.exit(1)
     
-    engine = MetadataForensicEngine(sys.argv[1])
-    print(json.dumps(engine.run(), indent=2))
+    import traceback
+
+    file_arg = sys.argv[1]
+    try:
+        engine = MetadataForensicEngine(file_arg)
+        result = engine.run()
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    except Exception as e:
+        tb = traceback.format_exc()
+        error_payload = {
+            "status": "error",
+            "message": str(e),
+            "trace": tb
+        }
+        # Ensure we always emit valid JSON for the controller to parse
+        print(json.dumps(error_payload, indent=2, ensure_ascii=False))
+        sys.exit(1)

@@ -97,84 +97,55 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
         });
       }
     } else {
-      // Use local Sherlock tool
+      // Use local Sherlock tool — simple invocation, no timeout/color flags
       try {
         const { stdout } = await execPromise(
-          `sherlock "${username}" --timeout 3 --print-all --no-color --no-txt 2>/dev/null || echo "completed"`
+          `sherlock "${username}" --print-all 2>/dev/null || true`,
+          { maxBuffer: 10 * 1024 * 1024, timeout: 300000 } // 5-min cap, 10 MB buffer
         );
 
         const platformMap = new Map<string, any>();
         const lines = stdout.split('\n');
-        
+
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed) continue;
 
+          // Sherlock output: [+] Platform: url | [-] Platform: msg | [!] Platform: msg
           if (/^\[(\+|-|!|\*)\]/.test(trimmed)) {
-            const match = trimmed.match(/^\[([+\-!\*])\]\s*(.*?):\s*(.*)$/);
+            const match = trimmed.match(/^\[([+\-!*])\]\s*(.*?):\s*(.*)$/);
             if (match && match.length >= 4) {
-              const flag = (match[1] || '').trim();
+              const flag     = (match[1] || '').trim();
               const platform = (match[2] || '').trim();
-              const detail = (match[3] || '').trim();
-              const status = flag === '+' ? 'found' : flag === '!' ? 'rate_limit' : flag === '*' ? 'error' : 'not_found';
-              const normalized = {
-                platform,
-                found: status === 'found',
-                status,
-                url: status === 'found' ? detail : '',
-                statusCode: status === 'found' ? 200 : status === 'rate_limit' ? 429 : status === 'error' ? 500 : 404,
-                message: detail,
-              };
-              if (platform) platformMap.set(platform.toLowerCase(), normalized);
+              const detail   = (match[3] || '').trim();
+              const status   = flag === '+' ? 'found' : flag === '!' ? 'rate_limit' : flag === '*' ? 'error' : 'not_found';
+              if (platform) {
+                platformMap.set(platform.toLowerCase(), {
+                  platform,
+                  found: status === 'found',
+                  status,
+                  url:        status === 'found' ? detail : '',
+                  statusCode: status === 'found' ? 200 : status === 'rate_limit' ? 429 : status === 'error' ? 500 : 404,
+                  message: detail,
+                });
+              }
             }
           }
         }
 
         const platforms = Array.from(platformMap.values()).map(normalizePlatform);
-        
-        // Clean up Sherlock report file from disk to keep workspace pristine
+
+        // Remove any txt report sherlock auto-creates
         const reportPath = path.join(process.cwd(), `${username}.txt`);
         if (fs.existsSync(reportPath)) {
-          try {
-            fs.unlinkSync(reportPath);
-          } catch (e) {
-            console.error('Failed to delete sherlock report file:', e);
-          }
+          try { fs.unlinkSync(reportPath); } catch (_) { /* ignore */ }
         }
 
-        const foundDiscovered = platforms.filter((p: any) => p.status === 'found');
-        if (foundDiscovered.length === 0 || username.toLowerCase() === 'thehusnain') {
-          // Fallback to high-fidelity presentation mock profiles if offline or no profiles found
-          const mockSites = [
-            { platform: 'GitHub', url: `https://github.com/${username}`, status: 'found', statusCode: 200, message: 'Active profile detected' },
-            { platform: 'Twitter', url: `https://twitter.com/${username}`, status: 'found', statusCode: 200, message: 'Active profile detected' },
-            { platform: 'Instagram', url: `https://instagram.com/${username}`, status: 'found', statusCode: 200, message: 'Active profile detected' },
-            { platform: 'Reddit', url: `https://reddit.com/user/${username}`, status: 'found', statusCode: 200, message: 'Active profile detected' },
-            { platform: 'LinkedIn', url: `https://linkedin.com/in/${username}`, status: 'found', statusCode: 200, message: 'Active profile detected' },
-            { platform: 'YouTube', url: `https://youtube.com/@${username}`, status: 'found', statusCode: 200, message: 'Active profile detected' },
-            { platform: 'Medium', url: `https://medium.com/@${username}`, status: 'found', statusCode: 200, message: 'Active profile detected' },
-          ];
-          const mockNotFound = [
-            { platform: 'TikTok', url: `https://tiktok.com/@${username}`, status: 'not_found', statusCode: 404, message: 'Not found' },
-            { platform: 'Twitch', url: `https://twitch.tv/${username}`, status: 'not_found', statusCode: 404, message: 'Not found' },
-            { platform: 'Pinterest', url: `https://pinterest.com/${username}`, status: 'not_found', statusCode: 404, message: 'Not found' },
-          ];
-          results.platforms = [...mockSites, ...mockNotFound].map(normalizePlatform);
-        } else {
-          results.platforms = platforms;
-        }
-
-        results.method = 'Local-Sherlock';
+        results.platforms = platforms;
+        results.method    = 'Local-Sherlock';
       } catch (execError) {
-        // Safe presentation mock fallback if command execution fails entirely
-        const mockSites = [
-          { platform: 'GitHub', url: `https://github.com/${username}`, status: 'found', statusCode: 200, message: 'Active profile detected' },
-          { platform: 'Twitter', url: `https://twitter.com/${username}`, status: 'found', statusCode: 200, message: 'Active profile detected' },
-          { platform: 'Instagram', url: `https://instagram.com/${username}`, status: 'found', statusCode: 200, message: 'Active profile detected' },
-          { platform: 'LinkedIn', url: `https://linkedin.com/in/${username}`, status: 'found', statusCode: 200, message: 'Active profile detected' },
-        ];
-        results.platforms = mockSites.map(normalizePlatform);
-        results.method = 'Mock-Fallback';
+        console.error('Sherlock exec error:', execError);
+        return res.status(500).json({ message: 'Sherlock execution failed. Make sure sherlock is installed (pip install sherlock-project).' });
       }
     }
 
