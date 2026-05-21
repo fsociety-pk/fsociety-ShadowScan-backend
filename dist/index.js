@@ -1,121 +1,136 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
 };
-Object.defineProperty(exports, "__esModule", { value: true });
-const express_1 = __importDefault(require("express"));
-const cors_1 = __importDefault(require("cors"));
-const dotenv_1 = __importDefault(require("dotenv"));
-const db_1 = __importDefault(require("./config/db"));
-const keyRotation_1 = require("./crons/keyRotation");
-const env_1 = require("./config/env");
-dotenv_1.default.config();
-(0, env_1.getJwtSecret)();
-// Connect to Database
-(0, db_1.default)();
-// Initialize Crons
-(0, keyRotation_1.initKeyRotationCron)();
-const app = (0, express_1.default)();
-const FRONTEND_URL = process.env.FRONTEND_URL || process.env.FRONTEND_ORIGIN || '';
-const FRONTEND_ORIGINS = process.env.FRONTEND_ORIGINS || FRONTEND_URL || '';
-const allowedOrigins = FRONTEND_ORIGINS
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
+var import_express = __toESM(require("express"));
+var import_cors = __toESM(require("cors"));
+var import_dotenv = __toESM(require("dotenv"));
+var import_db = __toESM(require("./config/db"));
+var import_keyRotation = require("./crons/keyRotation");
+var import_env = require("./config/env");
+var import_authRoutes = __toESM(require("./routes/authRoutes"));
+var import_caseRoutes = __toESM(require("./routes/caseRoutes"));
+var import_searchRoutes = __toESM(require("./routes/searchRoutes"));
+var import_userRoutes = __toESM(require("./routes/userRoutes"));
+var import_toolRoutes = __toESM(require("./routes/toolRoutes"));
+var import_kaliToolsRoutes = __toESM(require("./routes/kaliToolsRoutes"));
+var import_socialMediaFinderRoutes = __toESM(require("./routes/socialMediaFinderRoutes"));
+var import_reportRoutes = __toESM(require("./routes/reportRoutes"));
+var import_intelligenceReportRoutes = __toESM(require("./routes/intelligenceReportRoutes"));
+var import_admin = __toESM(require("./routes/admin"));
+var import_osintAnalystRoutes = __toESM(require("./routes/osintAnalystRoutes"));
+var import_chatRoutes = __toESM(require("./routes/chatRoutes"));
+import_dotenv.default.config();
+(0, import_env.getJwtSecret)();
+(0, import_db.default)();
+(0, import_keyRotation.initKeyRotationCron)();
+const app = (0, import_express.default)();
+const DEFAULT_ALLOWED_ORIGINS = [
+  "https://www.shadowscan.me",
+  "https://shadowscan.me",
+  "https://shadowscan.duckdns.org",
+  "http://www.shadowscan.me",
+  "http://shadowscan.me",
+  "http://localhost:5173",
+  "http://localhost:5000"
+];
+const FRONTEND_URL = process.env.FRONTEND_URL || process.env.FRONTEND_ORIGIN || DEFAULT_ALLOWED_ORIGINS[0];
+const FRONTEND_ORIGINS = process.env.FRONTEND_ORIGINS || DEFAULT_ALLOWED_ORIGINS.join(",");
+const allowedOrigins = Array.from(new Set([
+  ...DEFAULT_ALLOWED_ORIGINS,
+  ...FRONTEND_ORIGINS.split(",").map((s) => s.trim()).filter(Boolean),
+  FRONTEND_URL
+].filter(Boolean)));
 const normalizeOrigin = (value) => {
-    try {
-        return new URL(value).origin;
-    }
-    catch (_a) {
-        return value.trim().replace(/\/+$/, '');
-    }
+  try {
+    return new URL(value).origin;
+  } catch {
+    return value.trim().replace(/\/+$/, "");
+  }
 };
 const originMatches = (requestOrigin, allowedOrigin) => {
-    const request = normalizeOrigin(requestOrigin);
-    const allowed = normalizeOrigin(allowedOrigin);
-    if (request === allowed)
-        return true;
-    try {
-        const requestUrl = new URL(request);
-        const allowedUrl = new URL(allowed);
-        const requestHost = requestUrl.hostname.replace(/^www\./i, '');
-        const allowedHost = allowedUrl.hostname.replace(/^www\./i, '');
-        return requestUrl.protocol === allowedUrl.protocol && requestHost === allowedHost;
-    }
-    catch (_a) {
-        return false;
-    }
+  const request = normalizeOrigin(requestOrigin);
+  const allowed = normalizeOrigin(allowedOrigin);
+  if (request === allowed) return true;
+  try {
+    const requestUrl = new URL(request);
+    const allowedUrl = new URL(allowed);
+    const requestHost = requestUrl.hostname.replace(/^www\./i, "");
+    const allowedHost = allowedUrl.hostname.replace(/^www\./i, "");
+    return requestUrl.protocol === allowedUrl.protocol && requestHost === allowedHost;
+  } catch {
+    return false;
+  }
 };
 const isAllowedOrigin = (origin) => allowedOrigins.some((allowedOrigin) => originMatches(origin, allowedOrigin));
 const corsOptions = {
-    origin: (origin, callback) => {
-        // Allow server-to-server or tools without Origin header
-        if (!origin)
-            return callback(null, true);
-        // If allowedOrigins provided, only allow exact matches
-        if (allowedOrigins.length > 0) {
-            return callback(null, isAllowedOrigin(origin));
-        }
-        // Otherwise allow any origin (use caution in production)
-        return callback(null, true);
-    },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-csrf-token', 'x-sudo-token', 'Accept', 'Origin', 'X-Requested-With'],
-    credentials: true,
-    maxAge: 86400 // Cache preflight for 24h
-};
-app.use((0, cors_1.default)(corsOptions));
-// Handle OPTIONS preflight for all routes
-app.options(/.*/, (0, cors_1.default)(corsOptions));
-// Ensure CORS headers are set for any responses even if some middleware short-circuits
-app.use((req, res, next) => {
-    const requestOrigin = req.header('Origin');
-    let originToSet = FRONTEND_URL || '*';
-    if (requestOrigin && isAllowedOrigin(requestOrigin)) {
-        originToSet = requestOrigin;
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.length > 0) {
+      return callback(null, isAllowedOrigin(origin));
     }
-    res.setHeader('Access-Control-Allow-Origin', originToSet);
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-csrf-token, x-sudo-token, Accept, Origin, X-Requested-With');
-    if (req.method === 'OPTIONS')
-        return res.sendStatus(204);
-    next();
+    return callback(null, true);
+  },
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-csrf-token", "x-sudo-token", "Accept", "Origin", "X-Requested-With"],
+  credentials: true,
+  maxAge: 86400
+  // Cache preflight for 24h
+};
+app.use((0, import_cors.default)(corsOptions));
+app.use((req, res, next) => {
+  const requestOrigin = req.header("Origin");
+  let originToSet = FRONTEND_URL || "*";
+  if (requestOrigin && isAllowedOrigin(requestOrigin)) {
+    originToSet = requestOrigin;
+  }
+  res.setHeader("Access-Control-Allow-Origin", originToSet);
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS,PATCH");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-csrf-token, x-sudo-token, Accept, Origin, X-Requested-With");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
 });
-app.use(express_1.default.json({ limit: '50mb' }));
-app.use(express_1.default.urlencoded({ extended: true, limit: '50mb' }));
-const PORT = process.env.PORT || 5000;
-const authRoutes_1 = __importDefault(require("./routes/authRoutes"));
-const caseRoutes_1 = __importDefault(require("./routes/caseRoutes"));
-const searchRoutes_1 = __importDefault(require("./routes/searchRoutes"));
-const userRoutes_1 = __importDefault(require("./routes/userRoutes"));
-const toolRoutes_1 = __importDefault(require("./routes/toolRoutes"));
-const kaliToolsRoutes_1 = __importDefault(require("./routes/kaliToolsRoutes"));
-const socialMediaFinderRoutes_1 = __importDefault(require("./routes/socialMediaFinderRoutes"));
-const reportRoutes_1 = __importDefault(require("./routes/reportRoutes"));
-const intelligenceReportRoutes_1 = __importDefault(require("./routes/intelligenceReportRoutes"));
-const admin_1 = __importDefault(require("./routes/admin"));
-const osintAnalystRoutes_1 = __importDefault(require("./routes/osintAnalystRoutes"));
-const chatRoutes_1 = __importDefault(require("./routes/chatRoutes"));
-// Basic Route
-app.get('/', (req, res) => {
-    res.send('<h1>Fsociety ShadowScan API</h1><p>Status: ONLINE</p><p>Use the frontend to access the dashboard.</p>');
+app.use(import_express.default.json({ limit: "50mb" }));
+app.use(import_express.default.urlencoded({ extended: true, limit: "50mb" }));
+const PORT = process.env.PORT || 5e3;
+app.get("/", (req, res) => {
+  res.send("<h1>Fsociety ShadowScan API</h1><p>Status: ONLINE</p><p>Use the frontend to access the dashboard.</p>");
 });
-app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', message: 'Fsociety ShadowScan API is running' });
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", message: "Fsociety ShadowScan API is running" });
 });
-app.use('/api/auth', authRoutes_1.default);
-app.use('/api/cases', caseRoutes_1.default);
-app.use('/api/search', searchRoutes_1.default);
-app.use('/api/users', userRoutes_1.default);
-app.use('/api/tools', toolRoutes_1.default);
-app.use('/api/kali-tools', kaliToolsRoutes_1.default);
-app.use('/api/social-media', socialMediaFinderRoutes_1.default);
-app.use('/api/reports', reportRoutes_1.default);
-app.use('/api/intelligence', intelligenceReportRoutes_1.default);
-app.use('/api/admin', admin_1.default);
-app.use('/api/osint-analyst', osintAnalystRoutes_1.default);
-app.use('/api/chat', chatRoutes_1.default);
+app.use("/api/auth", import_authRoutes.default);
+app.use("/api/cases", import_caseRoutes.default);
+app.use("/api/search", import_searchRoutes.default);
+app.use("/api/users", import_userRoutes.default);
+app.use("/api/tools", import_toolRoutes.default);
+app.use("/api/kali-tools", import_kaliToolsRoutes.default);
+app.use("/api/social-media", import_socialMediaFinderRoutes.default);
+app.use("/api/reports", import_reportRoutes.default);
+app.use("/api/intelligence", import_intelligenceReportRoutes.default);
+app.use("/api/admin", import_admin.default);
+app.use("/api/osint-analyst", import_osintAnalystRoutes.default);
+app.use("/api/chat", import_chatRoutes.default);
 app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`\u{1F680} Server running on port ${PORT}`);
 });

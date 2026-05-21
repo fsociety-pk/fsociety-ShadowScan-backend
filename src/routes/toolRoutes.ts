@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
+import fs from 'fs';
 import path from 'path';
 import { 
     emailLookup, 
@@ -14,6 +15,11 @@ import { protect } from '../middleware/authMiddleware';
 import { checkSettings } from '../middleware/checkSettings';
 
 const router = Router();
+const uploadsDir = path.join(process.cwd(), 'uploads');
+
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+}
 
 // Protect and enforce system settings
 router.use(protect);
@@ -22,7 +28,7 @@ router.use(checkSettings);
 // Multer Configuration
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-        cb(null, 'uploads/');
+        cb(null, uploadsDir);
     },
     filename: (req, file, cb) => {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);

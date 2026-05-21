@@ -1,55 +1,70 @@
 "use strict";
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
-    });
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
 };
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
 };
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.initKeyRotationCron = void 0;
-const node_cron_1 = __importDefault(require("node-cron"));
-const SystemSettings_1 = __importDefault(require("../models/SystemSettings"));
-const AdminAuditLog_1 = __importDefault(require("../models/AdminAuditLog"));
-/**
- * Monthly API Key Rotation Job
- * Runs on the 1st of every month at midnight
- */
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+var keyRotation_exports = {};
+__export(keyRotation_exports, {
+  initKeyRotationCron: () => initKeyRotationCron
+});
+module.exports = __toCommonJS(keyRotation_exports);
+var import_node_cron = __toESM(require("node-cron"));
+var import_SystemSettings = __toESM(require("../models/SystemSettings"));
+var import_AdminAuditLog = __toESM(require("../models/AdminAuditLog"));
 const initKeyRotationCron = () => {
-    node_cron_1.default.schedule('0 0 1 * *', () => __awaiter(void 0, void 0, void 0, function* () {
-        console.log('[CRON] Starting monthly API key rotation...');
-        try {
-            const settings = yield SystemSettings_1.default.findOne();
-            if (!settings)
-                return;
-            // In a real scenario, this would call external provider APIs to refresh keys.
-            // Here we simulate it by re-encrypting or "rotating" the existing ones or generating mocks.
-            const updatedIntegrations = settings.apiIntegrations.map(api => {
-                // Mock rotation: append a rotation stamp or re-encrypt
-                const mockNewKey = `rotated_${Math.random().toString(36).slice(-10)}`;
-                return Object.assign(Object.assign({}, api), { lastChecked: new Date() });
-            });
-            yield SystemSettings_1.default.updateOne({}, { $set: { apiIntegrations: updatedIntegrations } });
-            // Log the systemic rotation
-            yield AdminAuditLog_1.default.create({
-                adminId: null, // System action
-                action: 'system_cron',
-                endpoint: 'internal_cron_job',
-                method: 'CRON',
-                ipAddress: '127.0.0.1',
-                changes: { action: 'monthly_api_key_rotation_check' },
-                timestamp: new Date()
-            });
-            console.log('[CRON] API key rotation check completed.');
-        }
-        catch (error) {
-            console.error('[CRON] API key rotation failed:', error);
-        }
-    }));
+  import_node_cron.default.schedule("0 0 1 * *", async () => {
+    console.log("[CRON] Starting monthly API key rotation...");
+    try {
+      const settings = await import_SystemSettings.default.findOne();
+      if (!settings) return;
+      const updatedIntegrations = settings.apiIntegrations.map((api) => {
+        const mockNewKey = `rotated_${Math.random().toString(36).slice(-10)}`;
+        return {
+          ...api,
+          lastChecked: /* @__PURE__ */ new Date()
+        };
+      });
+      await import_SystemSettings.default.updateOne({}, { $set: { apiIntegrations: updatedIntegrations } });
+      await import_AdminAuditLog.default.create({
+        adminId: null,
+        // System action
+        action: "system_cron",
+        endpoint: "internal_cron_job",
+        method: "CRON",
+        ipAddress: "127.0.0.1",
+        changes: { action: "monthly_api_key_rotation_check" },
+        timestamp: /* @__PURE__ */ new Date()
+      });
+      console.log("[CRON] API key rotation check completed.");
+    } catch (error) {
+      console.error("[CRON] API key rotation failed:", error);
+    }
+  });
 };
-exports.initKeyRotationCron = initKeyRotationCron;
+// Annotate the CommonJS export names for ESM import in node:
+0 && (module.exports = {
+  initKeyRotationCron
+});

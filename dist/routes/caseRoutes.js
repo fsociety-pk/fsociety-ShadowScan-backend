@@ -1,19 +1,46 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
 };
-Object.defineProperty(exports, "__esModule", { value: true });
-const express_1 = __importDefault(require("express"));
-const caseController_1 = require("../controllers/caseController");
-const authMiddleware_1 = require("../middleware/authMiddleware");
-const checkSettings_1 = require("../middleware/checkSettings");
-const router = express_1.default.Router();
-// All routes require authentication for personal workspace
-router.use(authMiddleware_1.protect);
-router.use(checkSettings_1.checkSettings);
-router.get('/', caseController_1.getCases);
-router.get('/:id', caseController_1.getCaseById);
-router.post('/', caseController_1.createCase);
-router.put('/:id', caseController_1.updateCase);
-router.delete('/:id', caseController_1.deleteCase);
-exports.default = router;
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+var caseRoutes_exports = {};
+__export(caseRoutes_exports, {
+  default: () => caseRoutes_default
+});
+module.exports = __toCommonJS(caseRoutes_exports);
+var import_express = __toESM(require("express"));
+var import_caseController = require("../controllers/caseController");
+var import_authMiddleware = require("../middleware/authMiddleware");
+var import_checkSettings = require("../middleware/checkSettings");
+const router = import_express.default.Router();
+router.use(import_authMiddleware.protect);
+router.use(import_checkSettings.checkSettings);
+router.get("/", import_caseController.getCases);
+router.get("/:id", import_caseController.getCaseById);
+router.post("/", import_caseController.createCase);
+router.put("/:id", import_caseController.updateCase);
+router.delete("/:id", import_caseController.deleteCase);
+var caseRoutes_default = router;

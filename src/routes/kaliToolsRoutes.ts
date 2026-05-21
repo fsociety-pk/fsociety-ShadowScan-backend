@@ -1,4 +1,5 @@
 import express, { Router } from 'express';
+import fs from 'fs';
 import multer from 'multer';
 import path from 'path';
 import {
@@ -11,10 +12,15 @@ import {
 import { protect } from '../middleware/authMiddleware';
 
 const router = Router();
+const uploadDir = '/tmp/osint-uploads';
+
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
 
 // Multer configuration for file uploads
 const upload = multer({
-  dest: '/tmp/osint-uploads/',
+  dest: uploadDir,
   limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
   fileFilter: (req, file, cb) => {
     const allowedMimes = [

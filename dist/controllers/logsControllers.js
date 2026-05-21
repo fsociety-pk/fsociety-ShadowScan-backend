@@ -1,216 +1,196 @@
 "use strict";
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+var logsControllers_exports = {};
+__export(logsControllers_exports, {
+  detectAnomalies: () => detectAnomalies,
+  exportLogs: () => exportLogs,
+  filterLogs: () => filterLogs,
+  getAllLogs: () => getAllLogs
+});
+module.exports = __toCommonJS(logsControllers_exports);
+var import_AdminLog = __toESM(require("../models/AdminLog"));
+var import_User = __toESM(require("../models/User"));
+const getAllLogs = async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
+    const logs = await import_AdminLog.default.find().populate("userId", "username email").sort({ timestamp: -1 }).skip(skip).limit(limit);
+    const total = await import_AdminLog.default.countDocuments();
+    res.json({
+      success: true,
+      data: logs,
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit)
+      }
     });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
 };
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
+const filterLogs = async (req, res) => {
+  try {
+    const { userId, action, dateFrom, dateTo, status, toolName, search } = req.query;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 100;
+    const skip = (page - 1) * limit;
+    const query = {};
+    if (userId) query.userId = userId;
+    if (action) query.action = action;
+    if (status) query.status = status;
+    if (toolName) query.toolName = toolName;
+    if (search) {
+      const orConditions = [
+        { ipAddress: { $regex: search, $options: "i" } }
+      ];
+      query.$or = orConditions;
+    }
+    if (dateFrom || dateTo) {
+      query.timestamp = {};
+      if (dateFrom) query.timestamp.$gte = new Date(dateFrom);
+      if (dateTo) query.timestamp.$lte = new Date(dateTo);
+    }
+    const logs = await import_AdminLog.default.find(query).populate("userId", "username email").sort({ timestamp: -1 }).skip(skip).limit(limit);
+    const total = await import_AdminLog.default.countDocuments(query);
+    res.json({
+      success: true,
+      data: logs,
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
 };
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.exportLogs = exports.detectAnomalies = exports.filterLogs = exports.getAllLogs = void 0;
-const AdminLog_1 = __importDefault(require("../models/AdminLog"));
-const User_1 = __importDefault(require("../models/User"));
-/**
- * 1. Get All Logs with pagination
- */
-const getAllLogs = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    try {
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 20;
-        const skip = (page - 1) * limit;
-        const logs = yield AdminLog_1.default.find()
-            .populate('userId', 'username email')
-            .sort({ timestamp: -1 })
-            .skip(skip)
-            .limit(limit);
-        const total = yield AdminLog_1.default.countDocuments();
-        res.json({
-            success: true,
-            data: logs,
-            pagination: {
-                total,
-                page,
-                limit,
-                pages: Math.ceil(total / limit)
-            }
-        });
+const detectAnomalies = async (req, res) => {
+  try {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1e3);
+    const anomalies = [];
+    let alertLevel = "low";
+    const burstActivity = await import_AdminLog.default.aggregate([
+      {
+        $match: {
+          timestamp: { $gte: oneHourAgo },
+          action: { $in: ["email_lookup", "username_scan", "phone_lookup", "metadata_extraction"] }
+        }
+      },
+      {
+        $group: {
+          _id: "$userId",
+          count: { $sum: 1 }
+        }
+      },
+      { $match: { count: { $gt: 50 } } }
+    ]);
+    for (const activity of burstActivity) {
+      const user = await import_User.default.findById(activity._id).select("username");
+      anomalies.push({
+        type: "Burst Activity",
+        userId: activity._id,
+        username: user?.username || "Unknown",
+        details: `Performed ${activity.count} scans in the last hour.`,
+        severity: "high"
+      });
+      alertLevel = "high";
     }
-    catch (error) {
-        res.status(500).json({ success: false, message: error.message });
+    const failedLogins = await import_AdminLog.default.aggregate([
+      {
+        $match: {
+          timestamp: { $gte: oneHourAgo },
+          action: "login_attempt",
+          status: "failed"
+        }
+      },
+      {
+        $group: {
+          _id: "$userId",
+          count: { $sum: 1 }
+        }
+      },
+      { $match: { count: { $gt: 5 } } }
+    ]);
+    for (const fail of failedLogins) {
+      const user = await import_User.default.findById(fail._id).select("username");
+      anomalies.push({
+        type: "Multiple Failed Logins",
+        userId: fail._id,
+        username: user?.username || "Unknown",
+        details: `${fail.count} failed login attempts in the last hour.`,
+        severity: "medium"
+      });
+      if (alertLevel !== "high") alertLevel = "medium";
     }
+    res.json({ success: true, data: { anomalies, alertLevel } });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+const exportLogs = async (req, res) => {
+  try {
+    const { userId, action, dateFrom, dateTo, status } = req.query;
+    const query = {};
+    if (userId) query.userId = userId;
+    if (action) query.action = action;
+    if (status) query.status = status;
+    if (dateFrom || dateTo) {
+      query.timestamp = {};
+      if (dateFrom) query.timestamp.$gte = new Date(dateFrom);
+      if (dateTo) query.timestamp.$lte = new Date(dateTo);
+    }
+    const logs = await import_AdminLog.default.find(query).populate("userId", "username email").sort({ timestamp: -1 });
+    let csv = "Timestamp,User,Email,Action,Tool,Status,IP,Details\n";
+    logs.forEach((log) => {
+      const timestamp = log.timestamp.toISOString();
+      const username = log.userId?.username || "N/A";
+      const email = log.userId?.email || "N/A";
+      const details = JSON.stringify(log.details).replace(/"/g, '""');
+      csv += `${timestamp},${username},${email},${log.action},${log.toolName},${log.status},${log.ipAddress || ""},"${details}"
+`;
+    });
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename=logs_export_${Date.now()}.csv`);
+    res.status(200).send(csv);
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+// Annotate the CommonJS export names for ESM import in node:
+0 && (module.exports = {
+  detectAnomalies,
+  exportLogs,
+  filterLogs,
+  getAllLogs
 });
-exports.getAllLogs = getAllLogs;
-/**
- * 2. Filter Logs
- */
-const filterLogs = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    try {
-        const { userId, action, dateFrom, dateTo, status, toolName, search } = req.query;
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 100;
-        const skip = (page - 1) * limit;
-        const query = {};
-        if (userId)
-            query.userId = userId;
-        if (action)
-            query.action = action;
-        if (status)
-            query.status = status;
-        if (toolName)
-            query.toolName = toolName;
-        if (search) {
-            // Create an array of conditions for $or
-            const orConditions = [
-                { ipAddress: { $regex: search, $options: 'i' } }
-            ];
-            // For username we need a separate check or aggregation but for now 
-            // let's stick to IP regex in query and we can handle username in frontend or a more complex aggregation
-            query.$or = orConditions;
-        }
-        if (dateFrom || dateTo) {
-            query.timestamp = {};
-            if (dateFrom)
-                query.timestamp.$gte = new Date(dateFrom);
-            if (dateTo)
-                query.timestamp.$lte = new Date(dateTo);
-        }
-        const logs = yield AdminLog_1.default.find(query)
-            .populate('userId', 'username email')
-            .sort({ timestamp: -1 })
-            .skip(skip)
-            .limit(limit);
-        const total = yield AdminLog_1.default.countDocuments(query);
-        res.json({
-            success: true,
-            data: logs,
-            pagination: {
-                total,
-                page,
-                limit,
-                pages: Math.ceil(total / limit)
-            }
-        });
-    }
-    catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    }
-});
-exports.filterLogs = filterLogs;
-/**
- * 3. Detect Anomalies
- */
-const detectAnomalies = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    try {
-        const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-        const anomalies = [];
-        let alertLevel = 'low';
-        // 1. Detect Burst Activity (> 50 scans in 1h)
-        const burstActivity = yield AdminLog_1.default.aggregate([
-            {
-                $match: {
-                    timestamp: { $gte: oneHourAgo },
-                    action: { $in: ['email_lookup', 'username_scan', 'phone_lookup', 'metadata_extraction'] }
-                }
-            },
-            {
-                $group: {
-                    _id: "$userId",
-                    count: { $sum: 1 }
-                }
-            },
-            { $match: { count: { $gt: 50 } } }
-        ]);
-        for (const activity of burstActivity) {
-            const user = yield User_1.default.findById(activity._id).select('username');
-            anomalies.push({
-                type: 'Burst Activity',
-                userId: activity._id,
-                username: (user === null || user === void 0 ? void 0 : user.username) || 'Unknown',
-                details: `Performed ${activity.count} scans in the last hour.`,
-                severity: 'high'
-            });
-            alertLevel = 'high';
-        }
-        // 2. Detect Multiple Failed Logins (> 5 in 1h)
-        const failedLogins = yield AdminLog_1.default.aggregate([
-            {
-                $match: {
-                    timestamp: { $gte: oneHourAgo },
-                    action: 'login_attempt',
-                    status: 'failed'
-                }
-            },
-            {
-                $group: {
-                    _id: "$userId",
-                    count: { $sum: 1 }
-                }
-            },
-            { $match: { count: { $gt: 5 } } }
-        ]);
-        for (const fail of failedLogins) {
-            const user = yield User_1.default.findById(fail._id).select('username');
-            anomalies.push({
-                type: 'Multiple Failed Logins',
-                userId: fail._id,
-                username: (user === null || user === void 0 ? void 0 : user.username) || 'Unknown',
-                details: `${fail.count} failed login attempts in the last hour.`,
-                severity: 'medium'
-            });
-            if (alertLevel !== 'high')
-                alertLevel = 'medium';
-        }
-        res.json({ success: true, data: { anomalies, alertLevel } });
-    }
-    catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    }
-});
-exports.detectAnomalies = detectAnomalies;
-/**
- * 4. Export Logs to CSV
- */
-const exportLogs = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    try {
-        const { userId, action, dateFrom, dateTo, status } = req.query;
-        const query = {};
-        if (userId)
-            query.userId = userId;
-        if (action)
-            query.action = action;
-        if (status)
-            query.status = status;
-        if (dateFrom || dateTo) {
-            query.timestamp = {};
-            if (dateFrom)
-                query.timestamp.$gte = new Date(dateFrom);
-            if (dateTo)
-                query.timestamp.$lte = new Date(dateTo);
-        }
-        const logs = yield AdminLog_1.default.find(query)
-            .populate('userId', 'username email')
-            .sort({ timestamp: -1 });
-        // Build CSV string
-        let csv = 'Timestamp,User,Email,Action,Tool,Status,IP,Details\n';
-        logs.forEach((log) => {
-            var _a, _b;
-            const timestamp = log.timestamp.toISOString();
-            const username = ((_a = log.userId) === null || _a === void 0 ? void 0 : _a.username) || 'N/A';
-            const email = ((_b = log.userId) === null || _b === void 0 ? void 0 : _b.email) || 'N/A';
-            const details = JSON.stringify(log.details).replace(/"/g, '""');
-            csv += `${timestamp},${username},${email},${log.action},${log.toolName},${log.status},${log.ipAddress || ''},"${details}"\n`;
-        });
-        res.setHeader('Content-Type', 'text/csv');
-        res.setHeader('Content-Disposition', `attachment; filename=logs_export_${Date.now()}.csv`);
-        res.status(200).send(csv);
-    }
-    catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    }
-});
-exports.exportLogs = exportLogs;

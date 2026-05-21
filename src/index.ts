@@ -16,12 +16,23 @@ initKeyRotationCron();
 
 const app = express();
 
-const FRONTEND_URL = process.env.FRONTEND_URL || process.env.FRONTEND_ORIGIN || '';
-const FRONTEND_ORIGINS = process.env.FRONTEND_ORIGINS || FRONTEND_URL || '';
-const allowedOrigins = FRONTEND_ORIGINS
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean);
+const DEFAULT_ALLOWED_ORIGINS = [
+  'https://www.shadowscan.me',
+  'https://shadowscan.me',
+  'https://shadowscan.duckdns.org',
+  'http://www.shadowscan.me',
+  'http://shadowscan.me',
+  'http://localhost:5173',
+  'http://localhost:5000',
+];
+
+const FRONTEND_URL = process.env.FRONTEND_URL || process.env.FRONTEND_ORIGIN || DEFAULT_ALLOWED_ORIGINS[0];
+const FRONTEND_ORIGINS = process.env.FRONTEND_ORIGINS || DEFAULT_ALLOWED_ORIGINS.join(',');
+const allowedOrigins = Array.from(new Set([
+  ...DEFAULT_ALLOWED_ORIGINS,
+  ...FRONTEND_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean),
+  FRONTEND_URL,
+].filter(Boolean)));
 
 const normalizeOrigin = (value: string) => {
   try {
@@ -70,9 +81,6 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-
-// Handle OPTIONS preflight for all routes
-app.options(/.*/, cors(corsOptions));
 
 // Ensure CORS headers are set for any responses even if some middleware short-circuits
 app.use((req, res, next) => {

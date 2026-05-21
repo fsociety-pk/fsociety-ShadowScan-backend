@@ -1,14 +1,42 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
 };
-Object.defineProperty(exports, "__esModule", { value: true });
-const express_1 = __importDefault(require("express"));
-const settingsControllers_1 = require("../../controllers/settingsControllers");
-const adminAuth_1 = require("../../middleware/adminAuth");
-const adminSecurity_1 = require("../../middleware/adminSecurity");
-const router = express_1.default.Router();
-router.use(adminAuth_1.adminAuth);
-router.get('/', settingsControllers_1.getSettings);
-router.patch('/', adminSecurity_1.requireReauth, settingsControllers_1.updateSettings);
-exports.default = router;
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+var settingsRoutes_exports = {};
+__export(settingsRoutes_exports, {
+  default: () => settingsRoutes_default
+});
+module.exports = __toCommonJS(settingsRoutes_exports);
+var import_express = __toESM(require("express"));
+var import_settingsControllers = require("../../controllers/settingsControllers");
+var import_adminAuth = require("../../middleware/adminAuth");
+var import_adminSecurity = require("../../middleware/adminSecurity");
+const router = import_express.default.Router();
+router.use(import_adminAuth.adminAuth);
+router.get("/", import_settingsControllers.getSettings);
+router.patch("/", import_adminSecurity.requireReauth, import_settingsControllers.updateSettings);
+var settingsRoutes_default = router;
