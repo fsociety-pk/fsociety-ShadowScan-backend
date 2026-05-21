@@ -23,13 +23,42 @@ const allowedOrigins = FRONTEND_ORIGINS
   .map((s) => s.trim())
   .filter(Boolean);
 
+const normalizeOrigin = (value: string) => {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return value.trim().replace(/\/+$/, '');
+  }
+};
+
+const originMatches = (requestOrigin: string, allowedOrigin: string) => {
+  const request = normalizeOrigin(requestOrigin);
+  const allowed = normalizeOrigin(allowedOrigin);
+
+  if (request === allowed) return true;
+
+  try {
+    const requestUrl = new URL(request);
+    const allowedUrl = new URL(allowed);
+    const requestHost = requestUrl.hostname.replace(/^www\./i, '');
+    const allowedHost = allowedUrl.hostname.replace(/^www\./i, '');
+
+    return requestUrl.protocol === allowedUrl.protocol && requestHost === allowedHost;
+  } catch {
+    return false;
+  }
+};
+
+const isAllowedOrigin = (origin: string) =>
+  allowedOrigins.some((allowedOrigin) => originMatches(origin, allowedOrigin));
+
 const corsOptions = {
   origin: (origin: any, callback: any) => {
     // Allow server-to-server or tools without Origin header
     if (!origin) return callback(null, true);
     // If allowedOrigins provided, only allow exact matches
     if (allowedOrigins.length > 0) {
-      return callback(null, allowedOrigins.includes(origin));
+      return callback(null, isAllowedOrigin(origin));
     }
     // Otherwise allow any origin (use caution in production)
     return callback(null, true);
@@ -50,7 +79,7 @@ app.use((req, res, next) => {
   const requestOrigin = req.header('Origin');
   let originToSet = FRONTEND_URL || '*';
   
-  if (requestOrigin && allowedOrigins.includes(requestOrigin)) {
+  if (requestOrigin && isAllowedOrigin(requestOrigin)) {
     originToSet = requestOrigin;
   }
   
