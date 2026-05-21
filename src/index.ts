@@ -18,9 +18,10 @@ const startServer = async () => {
     initKeyRotationCron();
 
     const PORT = process.env.PORT || 5000;
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
     });
+    server.timeout = 300000; // 5 minutes (300,000 ms) to allow long Sherlock queries
   } catch (error) {
     console.error('Failed to start server:', error);
     process.exit(1);

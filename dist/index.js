@@ -47,9 +47,10 @@ const startServer = async () => {
     await (0, import_db.default)();
     (0, import_keyRotation.initKeyRotationCron)();
     const PORT2 = process.env.PORT || 5e3;
-    app.listen(PORT2, () => {
+    const server = app.listen(PORT2, () => {
       console.log(`\u{1F680} Server running on port ${PORT2}`);
     });
+    server.timeout = 3e5;
   } catch (error) {
     console.error("Failed to start server:", error);
     process.exit(1);
