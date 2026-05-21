@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import mongoose from 'mongoose';
 import connectDB from './config/db';
 import { initKeyRotationCron } from './crons/keyRotation';
 import { getJwtSecret } from './config/env';
@@ -12,10 +13,10 @@ getJwtSecret();
 const startServer = async () => {
   try {
     await connectDB();
-    
+
     // Initialize Crons
     initKeyRotationCron();
-    
+
     const PORT = process.env.PORT || 5000;
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
@@ -98,11 +99,11 @@ app.use(cors(corsOptions));
 app.use((req, res, next) => {
   const requestOrigin = req.header('Origin');
   let originToSet = FRONTEND_URL || '*';
-  
+
   if (requestOrigin && isAllowedOrigin(requestOrigin)) {
     originToSet = requestOrigin;
   }
-  
+
   res.setHeader('Access-Control-Allow-Origin', originToSet);
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH');
@@ -138,10 +139,10 @@ app.get('/', (req, res) => {
 
 app.get('/api/health', (req, res) => {
   const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     message: 'Fsociety ShadowScan API is running',
-    database: dbStatus 
+    database: dbStatus
   });
 });
 
