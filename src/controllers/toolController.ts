@@ -3,6 +3,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import axios from 'axios';
 import crypto from 'crypto';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { spawn, exec } from 'child_process';
 import { promisify } from 'util';
@@ -89,6 +90,24 @@ const parseJsonFromProcessOutput = (stdout: string, stderr: string): any | null 
     }
 
     return null;
+};
+
+const resolveHoleheBinary = async (): Promise<string> => {
+    const explicit = process.env.HOLEHE_PATH?.trim();
+    const candidates = [
+        explicit || '',
+        path.join(process.cwd(), 'venv/bin/holehe'),
+        path.join(__dirname, '../../venv/bin/holehe'),
+        path.join(os.homedir(), '.local/bin/holehe'),
+        '/usr/local/bin/holehe',
+        '/usr/bin/holehe',
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+        if (candidate && fs.existsSync(candidate)) return candidate;
+    }
+
+    return 'holehe';
 };
 
 const getEmailProviderType = (email: string): 'corporate' | 'webmail' | 'disposable' => {
@@ -258,7 +277,9 @@ const lookupHolehe = async (email: string): Promise<{ raw: string; sites: { doma
     try {
         const timeoutSec = parseInt(process.env.HOLEHE_SITE_TIMEOUT_SEC || '', 10) || 8;
         const commandTimeoutMs = parseInt(process.env.HOLEHE_COMMAND_TIMEOUT_MS || '', 10) || 180000;
-        const command = `holehe ${JSON.stringify(email)} --no-color --no-clear -T ${timeoutSec}`;
+        const holeheBinary = await resolveHoleheBinary();
+        const escapedBin = JSON.stringify(holeheBinary);
+        const command = `${escapedBin} ${JSON.stringify(email)} --no-color --no-clear -T ${timeoutSec}`;
 
         const { stdout, stderr } = await execPromise(command, {
             timeout: commandTimeoutMs,

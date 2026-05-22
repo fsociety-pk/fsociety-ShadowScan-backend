@@ -3,6 +3,7 @@ import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import axios from 'axios';
 import { logUserActivity } from '../utils/logActivity';
 import Finding from '../models/Finding';
@@ -34,6 +35,18 @@ const toolExists = async (toolName: string): Promise<boolean> => {
   }
 };
 
+const resolveToolBinary = async (toolName: string, candidates: string[] = []): Promise<string | null> => {
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+
+  if (await toolExists(toolName)) {
+    return toolName;
+  }
+
+  return null;
+};
+
 /**
  * Normalize a raw platform entry from any sherlock output format into a
  * consistent shape. Handles JSON file output, stdout JSON blobs, and
@@ -62,10 +75,18 @@ const normalizePlatform = (item: any) => {
   };
 };
 
-const runSherlockCommand = (args: string[], timeoutMs: number): Promise<SherlockExecResult> => {
+const getSherlockScratchDir = (username: string) => {
+  const baseDir = process.platform === 'linux' && fs.existsSync('/dev/shm')
+    ? '/dev/shm'
+    : os.tmpdir();
+  return path.join(baseDir, `shadowscan-sherlock-${username}-${Date.now()}`);
+};
+
+const runSherlockCommand = (binary: string, args: string[], timeoutMs: number, cwd?: string): Promise<SherlockExecResult> => {
   return new Promise((resolve) => {
-    const proc = spawn('sherlock', args, {
+    const proc = spawn(binary, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
+      cwd,
       env: process.env,
     });
 
@@ -205,7 +226,14 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
   };
 
   try {
-    const hasSherlock = await toolExists('sherlock');
+    const sherlockBinary = await resolveToolBinary('sherlock', [
+      process.env.SHERLOCK_PATH || '',
+      path.join(os.homedir(), '.local/bin/sherlock'),
+      '/usr/local/bin/sherlock',
+      '/usr/bin/sherlock',
+    ]);
+
+    const hasSherlock = !!sherlockBinary;
 
     if (!hasSherlock) {
       // ── Fallback: direct HTTP HEAD probes ──────────────────────────────────
@@ -214,192 +242,68 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
 
     } else {
       // ── Primary: local Sherlock tool ───────────────────────────────────────
-      //
-      // IMPORTANT — Sherlock flag reference:
-      //   --json <FILE>         = INPUT custom sites-data file (NOT output!)
-      //   --folderoutput <DIR>  = write all output files (txt + json) into DIR
-      //
-      // Strategy:
-      //   1. Run sherlock with --folderoutput /tmp/<tmpdir>
-      //      Sherlock writes <tmpdir>/<username>.json automatically.
-      //   2. Parse that JSON file.
-      //   3. If file missing/unreadable, fall back to parsing stdout text lines.
-      //   4. Always clean up the tmp folder.
-      //
-      // NOTE: Sherlock exits with code 1 when it finds ≥1 "not found" result —
-      //       that is NORMAL. We must parse stdout/files even on code 1.
-      //
+      // Use the plain command and capture stdout/stderr only.
+      // Sherlock itself may try to write output files in the current working
+      // directory, so we run it inside an ephemeral tmpfs-backed folder when
+      // available. That keeps the scan from consuming the project disk.
+      const scratchDir = getSherlockScratchDir(cleanUsername);
+      try { fs.mkdirSync(scratchDir, { recursive: true }); } catch (_) { /* ignore */ }
 
-      const tmpDir = `/tmp/sherlock_${cleanUsername}_${Date.now()}`;
-      const jsonOutFile = path.join(tmpDir, `${cleanUsername}.json`);
-
-      // Create a dedicated tmp folder so we never collide across concurrent requests
-      try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (_) { /* ignore */ }
-
-      // stdout captured from both success and code-1 exits
-      let stdout = '';
-      let stderr = '';
-
-      const perSiteTimeoutSec = parseInt(process.env.SHERLOCK_SITE_TIMEOUT_SEC || '', 10) || 6;
       const commandTimeoutMs = parseInt(process.env.SHERLOCK_COMMAND_TIMEOUT_MS || '', 10) || 90000;
-      let localTimedOut = false;
+      const run = await runSherlockCommand(sherlockBinary as string, [cleanUsername], commandTimeoutMs, scratchDir);
+      const stdout = run.stdout || '';
+      const stderr = run.stderr || '';
+      const combined = `${stdout}\n${stderr}`.trim();
 
-      // Try the simplest invocation first (some environments have issues with extra flags)
-      const sherlockVariants: string[][] = [
-        [cleanUsername],
-        [cleanUsername, '--print-all', '--folderoutput', tmpDir, '--no-color', '--timeout', String(perSiteTimeoutSec)],
-        [cleanUsername, '--print-all', '--folderoutput', tmpDir, '--timeout', String(perSiteTimeoutSec)],
-        [cleanUsername, '--print-found', '--folderoutput', tmpDir, '--no-color', '--timeout', String(perSiteTimeoutSec)],
-      ];
+      const platformMap = new Map<string, any>();
+      const lines = combined.split('\n').map((line) => line.trim()).filter(Boolean);
 
-      let ranVariant = false;
-      for (const args of sherlockVariants) {
-        const run = await runSherlockCommand(args, commandTimeoutMs);
-        stdout = run.stdout;
-        stderr = run.stderr;
+      for (const line of lines) {
+        if (!line.startsWith('[')) continue;
+        if (/^\[\s*\d+\s*\//.test(line)) continue;
+        if (/update available|checking username|sites checked|saved in|results/i.test(line)) continue;
 
-        // 0 => success, 1 => normal Sherlock partial/not-found exits
-        if (!run.timedOut && (run.exitCode === 0 || run.exitCode === 1)) {
-          ranVariant = true;
-          break;
-        }
+        const match = line.match(/^\[([+\-!*])\]\s*(.*?):\s*(.*)$/);
+        if (!match) continue;
 
-        // Stop retrying variants if command timed out; this is operational, not syntax.
-        if (run.timedOut) {
-          localTimedOut = true;
-          break;
-        }
+        const flag = match[1];
+        const platform = match[2].trim();
+        const detail = match[3].trim();
+        if (!platform) continue;
 
-        // If we still got useful stdout, continue parsing it instead of failing hard.
-        if (stdout.trim().length > 0) {
-          ranVariant = true;
-          break;
-        }
+        const status = flag === '+' ? 'found'
+          : flag === '!' ? 'rate_limit'
+            : flag === '*' ? 'error'
+              : 'not_found';
+
+        platformMap.set(platform.toLowerCase(), {
+          platform,
+          found: status === 'found',
+          status,
+          url: status === 'found' ? detail : '',
+          statusCode: status === 'found' ? 200 : status === 'rate_limit' ? 429 : status === 'error' ? 500 : 404,
+          message: detail,
+        });
       }
 
-      if (!results.error && !ranVariant && !stdout.trim()) {
-        if (localTimedOut) {
-          results.platforms = await runSherlockFallbackProbes(cleanUsername);
-          results.method = 'API-Fallback-Timeout';
-        } else {
-          console.error('[Sherlock] failed to execute any variant', { stderr: stderr.substring(0, 400) });
-          results.method = 'Failed';
-          results.error = `Sherlock execution failed. ${stderr.substring(0, 220) || 'No output from command.'}`;
-          results.platforms = [];
-        }
+      results.platforms = Array.from(platformMap.values()).map(normalizePlatform);
+      results.method = 'Local-Sherlock-Stdout';
+      results.rawOutput = combined;
+      results.summary = {
+        totalPlatformsChecked: results.platforms.length,
+        platformsFound: results.platforms.filter((p: any) => p.status === 'found').length,
+        successRate: results.platforms.length > 0
+          ? `${((results.platforms.filter((p: any) => p.status === 'found').length / results.platforms.length) * 100).toFixed(2)}%`
+          : '0%',
+        status: results.platforms.filter((p: any) => p.status === 'found').length > 0 ? 'success' : 'no_results',
+      };
+
+      if (run.timedOut && results.platforms.length === 0) {
+        results.platforms = await runSherlockFallbackProbes(cleanUsername);
+        results.method = 'API-Fallback-Timeout';
       }
 
-      // Only attempt to parse if we don't already have a hard failure
-      if (!results.error) {
-        const platformMap = new Map<string, any>();
-
-        // ── Strategy 1: parse the JSON output file ─────────────────────────
-        let parsedFromFile = false;
-        if (fs.existsSync(jsonOutFile)) {
-          try {
-            const jsonContent = fs.readFileSync(jsonOutFile, 'utf8');
-            const jsonData = JSON.parse(jsonContent);
-
-            // Sherlock ≥0.14 JSON shape:
-            // {
-            //   "Instagram": {
-            //     "url_main": "https://www.instagram.com/",
-            //     "url_user": "https://www.instagram.com/thehusnain/",
-            //     "status":   { "status": "Claimed", "message": "...", "query_time": 0.5 },
-            //     "http_status": 200,
-            //     "response_text_len": 12345
-            //   }, ...
-            // }
-            for (const [platformName, data] of Object.entries(jsonData)) {
-              if (!data || typeof data !== 'object') continue;
-              const item = data as any;
-              const statusObj = typeof item.status === 'object' ? item.status : item;
-              const statusStr = String(statusObj?.status ?? item?.status ?? '').toLowerCase();
-              const msgStr = String(statusObj?.message ?? '').toLowerCase();
-
-              const found = statusStr === 'claimed' || statusStr === 'found';
-              const rateLimit = !found && (statusStr === 'unknown' && msgStr.includes('429'));
-              const isError = !found && !rateLimit && statusStr === 'unknown' && msgStr.includes('error');
-
-              platformMap.set(platformName.toLowerCase(), {
-                platform: platformName,
-                found,
-                status: found ? 'found' : rateLimit ? 'rate_limit' : isError ? 'error' : 'not_found',
-                url: item?.url_user || item?.url || '',
-                statusCode: item?.http_status ?? (found ? 200 : rateLimit ? 429 : isError ? 500 : 404),
-                message: statusObj?.message ?? (found ? 'Profile found' : 'No profile found'),
-              });
-            }
-            parsedFromFile = platformMap.size > 0;
-          } catch (jsonErr) {
-            console.warn('[Sherlock] JSON file parse failed, falling back to stdout:', jsonErr);
-          }
-        }
-
-        // ── Strategy 2: parse stdout text lines (fallback) ─────────────────
-        if (!parsedFromFile && stdout) {
-          const lines = stdout.split('\n');
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed) continue;
-
-            // Format: [+] Platform: https://site.com/user
-            //         [-] Platform: Not Found!
-            //         [!] Platform: <rate-limit message>
-            //         [*] Platform: <error>
-            const match = trimmed.match(/^\[([+\-!*])\]\s*(.*?):\s*(.*)$/);
-            if (!match) continue;
-
-            const flag = match[1].trim();
-            const platform = match[2].trim();
-            const detail = match[3].trim();
-            if (!platform) continue;
-
-            const platformLower = platform.toLowerCase();
-            if (
-              platformLower.startsWith('checking username')
-              || platformLower.startsWith('searching')
-              || platformLower.startsWith('results')
-              || platformLower.includes('saved in')
-              || platformLower.includes('sites checked')
-            ) {
-              continue;
-            }
-
-            const status =
-              flag === '+' ? 'found'
-                : flag === '!' ? 'rate_limit'
-                  : flag === '*' ? 'error'
-                    : 'not_found';
-
-            platformMap.set(platform.toLowerCase(), {
-              platform,
-              found: status === 'found',
-              status,
-              url: status === 'found' ? detail : '',
-              statusCode: status === 'found' ? 200 : status === 'rate_limit' ? 429 : status === 'error' ? 500 : 404,
-              message: detail,
-            });
-          }
-        }
-
-        results.platforms = Array.from(platformMap.values()).map(normalizePlatform);
-        if (results.platforms.length === 0 && localTimedOut) {
-          results.platforms = await runSherlockFallbackProbes(cleanUsername);
-          results.method = 'API-Fallback-Timeout';
-        } else {
-          results.method = parsedFromFile ? 'Local-Sherlock-JSON' : 'Local-Sherlock-Text';
-        }
-      }
-
-      // ── Clean up tmp folder ────────────────────────────────────────────────
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) { /* ignore */ }
-
-      // Also remove any stray files Sherlock may have dropped in cwd
-      for (const ext of ['.txt', '.csv']) {
-        const stray = path.join(process.cwd(), `${cleanUsername}${ext}`);
-        if (fs.existsSync(stray)) try { fs.unlinkSync(stray); } catch (_) { /* ignore */ }
-      }
+      try { fs.rmSync(scratchDir, { recursive: true, force: true }); } catch (_) { /* ignore */ }
     }
 
     // ── Logging & persistence ──────────────────────────────────────────────
@@ -486,7 +390,14 @@ export const sherlockStream = async (req: Request, res: Response) => {
   send({ type: 'status', message: `[*] Starting username scan for: ${cleanUsername}` });
 
   try {
-    const hasSherlock = await toolExists('sherlock');
+    const sherlockBinary = await resolveToolBinary('sherlock', [
+      process.env.SHERLOCK_PATH || '',
+      path.join(os.homedir(), '.local/bin/sherlock'),
+      '/usr/local/bin/sherlock',
+      '/usr/bin/sherlock',
+    ]);
+
+    const hasSherlock = !!sherlockBinary;
 
     if (!hasSherlock) {
       // ── Fallback: probe known platforms one by one (SSE) ──────────────────
@@ -557,7 +468,7 @@ export const sherlockStream = async (req: Request, res: Response) => {
       // ── Primary: local Sherlock with live stdout streaming ─────────────────
       const siteTimeoutSec = parseInt(process.env.SHERLOCK_SITE_TIMEOUT_SEC || '', 10) || 8;
       // Use the simplest invocation to avoid some environment/network related errors
-      const proc = spawn('sherlock', [cleanUsername], {
+      const proc = spawn(sherlockBinary as string, [cleanUsername], {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 

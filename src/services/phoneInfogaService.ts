@@ -1,4 +1,11 @@
 import axios from 'axios';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execPromise = promisify(exec);
 
 export interface PhoneInfogaResult {
   country_code: number;
@@ -90,6 +97,165 @@ const disposableHint = (cleanPhone: string) => {
     return 'No disposable-number heuristic triggered';
 };
 
+const resolvePhoneInfogaBinary = async (): Promise<string | null> => {
+    const explicitPath = process.env.PHONEINFOGA_PATH?.trim();
+    const candidates = [
+        explicitPath || '',
+        path.join(process.cwd(), 'phoneinfoga'),
+        path.join(process.cwd(), 'venv/bin/phoneinfoga'),
+        path.join(os.homedir(), '.local/bin/phoneinfoga'),
+        '/usr/local/bin/phoneinfoga',
+        '/usr/bin/phoneinfoga',
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+        if (candidate && fs.existsSync(candidate)) return candidate;
+    }
+
+    try {
+        await execPromise('command -v phoneinfoga');
+        return 'phoneinfoga';
+    } catch {
+        return null;
+    }
+};
+
+const parseJsonPayload = (blob: string): any | null => {
+    const trimmed = (blob || '').trim();
+    if (!trimmed) return null;
+
+    try {
+        return JSON.parse(trimmed);
+    } catch {
+        // Try parsing the largest JSON object in mixed logs
+        const start = trimmed.indexOf('{');
+        const end = trimmed.lastIndexOf('}');
+        if (start >= 0 && end > start) {
+            const candidate = trimmed.slice(start, end + 1);
+            try {
+                return JSON.parse(candidate);
+            } catch {
+                return null;
+            }
+        }
+        return null;
+    }
+};
+
+const parseField = (text: string, patterns: RegExp[], fallback: string) => {
+    for (const pattern of patterns) {
+        const match = text.match(pattern);
+        if (match?.[1]?.trim()) return match[1].trim();
+    }
+    return fallback;
+};
+
+const buildResultFromParsedData = (cleanPhone: string, result: any, sourceLabel: string): PhoneInfogaResult => {
+    const country = result.country || result.country_name || result.region || result.location?.country || 'Unknown';
+    const carrier = result.carrier || result.operator || result.network || result.numverify?.carrier || 'Unknown (requires numverify)';
+    const line_type = result.line_type || result.type || result.numverify?.line_type || 'Unknown';
+    const exists = typeof result.exists === 'boolean'
+        ? result.exists
+        : typeof result.valid === 'boolean'
+            ? result.valid
+            : cleanPhone.length >= 8;
+    const countryCodeRaw = result.country_code || result.countryCode || result.calling_code || result.countryCallingCode || 0;
+    const countryCode = Number(countryCodeRaw) || 0;
+    const international = result.international || result.international_format || result.number?.international || `+${cleanPhone}`;
+    const e164 = result.e164 || result.number?.e164 || `+${cleanPhone}`;
+
+    const reputation = result.reputation || buildReputation(cleanPhone, carrier, line_type);
+    const footprint = result.footprint || buildFootprint(cleanPhone, country, carrier);
+
+    return {
+        country_code: countryCode,
+        country,
+        international,
+        e164,
+        carrier,
+        line_type,
+        exists,
+        reputation,
+        footprint,
+        sources: Array.isArray(result.sources) && result.sources.length > 0
+            ? result.sources
+            : [sourceLabel, 'Carrier metadata'],
+        success: true,
+    };
+};
+
+const runPhoneInfogaCli = async (binary: string, cleanPhone: string): Promise<PhoneInfogaResult | null> => {
+    const target = cleanPhone.startsWith('+') ? cleanPhone : `+${cleanPhone}`;
+    const escapedBinary = JSON.stringify(binary);
+    const escapedTarget = JSON.stringify(target);
+
+    const commandVariants = [
+        `${escapedBinary} scan -n ${escapedTarget} --output json`,
+        `${escapedBinary} scan -n ${escapedTarget} -o json`,
+        `${escapedBinary} scan -n ${escapedTarget}`,
+    ];
+
+    for (const command of commandVariants) {
+        try {
+            const { stdout, stderr } = await execPromise(command, {
+                timeout: parseInt(process.env.PHONEINFOGA_TIMEOUT_MS || '', 10) || 60000,
+                maxBuffer: 5 * 1024 * 1024,
+                env: process.env,
+            });
+
+            const combined = `${stdout || ''}\n${stderr || ''}`.trim();
+            if (!combined) continue;
+
+            const asJson = parseJsonPayload(combined);
+            if (asJson) {
+                const resultObj = asJson.result || asJson.data || asJson;
+                return buildResultFromParsedData(cleanPhone, resultObj, 'PhoneInfoga CLI binary');
+            }
+
+            // Text-output fallback parsing
+            const country = parseField(combined, [/country(?:\s+name)?\s*[:=]\s*([^\n]+)/i], 'Unknown');
+            const carrier = parseField(combined, [/carrier\s*[:=]\s*([^\n]+)/i, /operator\s*[:=]\s*([^\n]+)/i], 'Unknown (requires numverify)');
+            const lineType = parseField(combined, [/line\s*type\s*[:=]\s*([^\n]+)/i, /type\s*[:=]\s*([^\n]+)/i], 'Unknown');
+            const international = parseField(combined, [/international\s*[:=]\s*([^\n]+)/i], target);
+            const e164 = parseField(combined, [/e164\s*[:=]\s*([^\n]+)/i], target);
+            const ccText = parseField(combined, [/country\s*code\s*[:=]\s*\+?([^\n\s]+)/i], '0');
+            const countryCode = Number(ccText.replace(/[^0-9]/g, '')) || 0;
+
+            const negativeExists = /not\s+valid|invalid\s+number|not\s+found/i.test(combined);
+            const positiveExists = /valid|exists|found|reachable/i.test(combined);
+            const exists = negativeExists ? false : (positiveExists ? true : cleanPhone.length >= 8);
+
+            return {
+                country_code: countryCode,
+                country,
+                international,
+                e164,
+                carrier,
+                line_type: lineType,
+                exists,
+                reputation: buildReputation(cleanPhone, carrier, lineType),
+                footprint: buildFootprint(cleanPhone, country, carrier),
+                sources: ['PhoneInfoga CLI binary', 'Carrier metadata'],
+                success: true,
+            };
+        } catch (err: any) {
+            const combinedErr = `${err?.stdout || ''}\n${err?.stderr || ''}\n${err?.message || ''}`;
+            // Try next variant for unsupported flags/syntax differences.
+            if (/unknown\s+flag|unknown\s+command|invalid\s+argument/i.test(combinedErr)) {
+                continue;
+            }
+            // If process returned parseable output in stderr/stdout, attempt one last parse.
+            const asJson = parseJsonPayload(combinedErr);
+            if (asJson) {
+                const resultObj = asJson.result || asJson.data || asJson;
+                return buildResultFromParsedData(cleanPhone, resultObj, 'PhoneInfoga CLI binary');
+            }
+        }
+    }
+
+    return null;
+};
+
 const getFallbackDetails = (cleanPhone: string): PhoneInfogaResult => {
     let cc = 0;
     let country = 'Unknown';
@@ -140,9 +306,18 @@ const getFallbackDetails = (cleanPhone: string): PhoneInfogaResult => {
 };
 
 export const fetchPhoneInfoga = async (phone: string): Promise<PhoneInfogaResult> => {
+    const cleanPhone = phone.replace(/[^0-9]/g, '');
+
     try {
-        const cleanPhone = phone.replace(/[^0-9]/g, '');
-        console.log(`[PhoneInfoga OSINT] Querying PhoneInfoga local scan for: ${cleanPhone}`);
+        const binary = await resolvePhoneInfogaBinary();
+        if (binary) {
+            console.log(`[PhoneInfoga OSINT] Querying local PhoneInfoga CLI (${binary}) for: ${cleanPhone}`);
+            const cliResult = await runPhoneInfogaCli(binary, cleanPhone);
+            if (cliResult) return cliResult;
+        }
+
+        // Legacy Docker/API fallback (kept for compatibility)
+        console.log(`[PhoneInfoga OSINT] Querying PhoneInfoga API local scan for: ${cleanPhone}`);
         
         const response = await axios.get(`http://localhost:5050/api/numbers/${cleanPhone}/scan/local`, {
             timeout: 3000,
@@ -177,7 +352,6 @@ export const fetchPhoneInfoga = async (phone: string): Promise<PhoneInfogaResult
         return getFallbackDetails(cleanPhone);
     } catch (e: any) {
         console.warn(`[PhoneInfoga OSINT] Failed (${e.message}). Using intelligent fallback.`);
-        const cleanPhone = phone.replace(/[^0-9]/g, '');
         return getFallbackDetails(cleanPhone);
     }
 };
