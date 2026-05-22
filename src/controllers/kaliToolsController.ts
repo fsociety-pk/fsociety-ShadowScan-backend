@@ -161,121 +161,156 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
     } else {
       // ── Primary: local Sherlock tool ───────────────────────────────────────
       //
-      // KEY FIX: --json requires a file path argument.
-      // We write to /tmp, parse the file, then delete it.
+      // IMPORTANT — Sherlock flag reference:
+      //   --json <FILE>         = INPUT custom sites-data file (NOT output!)
+      //   --folderoutput <DIR>  = write all output files (txt + json) into DIR
       //
-      const jsonOutputPath = `/tmp/sherlock_${cleanUsername}_${Date.now()}.json`;
+      // Strategy:
+      //   1. Run sherlock with --folderoutput /tmp/<tmpdir>
+      //      Sherlock writes <tmpdir>/<username>.json automatically.
+      //   2. Parse that JSON file.
+      //   3. If file missing/unreadable, fall back to parsing stdout text lines.
+      //   4. Always clean up the tmp folder.
+      //
+      // NOTE: Sherlock exits with code 1 when it finds ≥1 "not found" result —
+      //       that is NORMAL. We must parse stdout/files even on code 1.
+      //
+
+      const tmpDir = `/tmp/sherlock_${cleanUsername}_${Date.now()}`;
+      const jsonOutFile = path.join(tmpDir, `${cleanUsername}.json`);
+
+      // Create a dedicated tmp folder so we never collide across concurrent requests
+      try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (_) { /* ignore */ }
+
+      // stdout captured from both success and code-1 exits
+      let stdout = '';
 
       try {
-        const { stdout } = await execPromise(
-          `sherlock "${cleanUsername}" --print-all --json "${jsonOutputPath}" 2>&1`,
+        const execResult = await execPromise(
+          `sherlock "${cleanUsername}" --print-all --folderoutput "${tmpDir}" --no-color 2>&1`,
           { maxBuffer: 10 * 1024 * 1024, timeout: 120000 }
         );
+        stdout = execResult.stdout;
+      } catch (execError: any) {
+        // code 1  → normal "some not found" exit — stdout still has full results
+        // code 2  → argument error — nothing useful in stdout
+        // other   → network/timeout issue
+        stdout = execError?.stdout ?? '';
 
+        if (execError?.code === 2) {
+          console.error('[Sherlock] Argument error (code 2):', execError?.stdout?.substring(0, 400));
+          results.method = 'Failed';
+          results.error = `Sherlock CLI argument error. Raw: ${execError?.stdout?.substring(0, 300)}`;
+          results.platforms = [];
+          try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) { /* ignore */ }
+          // Skip to response — fall through to the summary block below
+        } else if (!stdout) {
+          console.error('[Sherlock] exec error (no stdout):', {
+            code: execError?.code,
+            message: execError?.message,
+          });
+          results.method = 'Failed';
+          results.error = 'Sherlock execution failed with no output';
+          results.platforms = [];
+          try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) { /* ignore */ }
+        }
+        // If stdout is present (code 1), we continue parsing below
+      }
+
+      // Only attempt to parse if we don't already have a hard failure
+      if (!results.error) {
         const platformMap = new Map<string, any>();
 
         // ── Strategy 1: parse the JSON output file ─────────────────────────
         let parsedFromFile = false;
-        if (fs.existsSync(jsonOutputPath)) {
+        if (fs.existsSync(jsonOutFile)) {
           try {
-            const jsonContent = fs.readFileSync(jsonOutputPath, 'utf8');
+            const jsonContent = fs.readFileSync(jsonOutFile, 'utf8');
             const jsonData = JSON.parse(jsonContent);
 
+            // Sherlock ≥0.14 JSON shape:
+            // {
+            //   "Instagram": {
+            //     "url_main": "https://www.instagram.com/",
+            //     "url_user": "https://www.instagram.com/thehusnain/",
+            //     "status":   { "status": "Claimed", "message": "...", "query_time": 0.5 },
+            //     "http_status": 200,
+            //     "response_text_len": 12345
+            //   }, ...
+            // }
             for (const [platformName, data] of Object.entries(jsonData)) {
-              if (data && typeof data === 'object') {
-                const item = data as any;
-                // Sherlock JSON: { "status": { "status": "Claimed", ... }, "url_user": "...", ... }
-                const statusObj = item?.status ?? item;
-                const statusStr = String(statusObj?.status ?? '').toLowerCase();
-                const found = statusStr === 'claimed' || statusStr === 'found' || item?.found === true;
-                const rateLimit = statusStr === 'unknown' && String(statusObj?.message ?? '').toLowerCase().includes('429');
+              if (!data || typeof data !== 'object') continue;
+              const item = data as any;
+              const statusObj = typeof item.status === 'object' ? item.status : item;
+              const statusStr = String(statusObj?.status ?? item?.status ?? '').toLowerCase();
+              const msgStr = String(statusObj?.message ?? '').toLowerCase();
 
-                platformMap.set(platformName.toLowerCase(), {
-                  platform: platformName,
-                  found,
-                  status: found ? 'found' : rateLimit ? 'rate_limit' : 'not_found',
-                  url: item?.url_user || item?.url || '',
-                  statusCode: found ? 200 : rateLimit ? 429 : 404,
-                  message: statusObj?.message || (found ? 'Profile found' : 'No profile found'),
-                });
-              }
+              const found = statusStr === 'claimed' || statusStr === 'found';
+              const rateLimit = !found && (statusStr === 'unknown' && msgStr.includes('429'));
+              const isError = !found && !rateLimit && statusStr === 'unknown' && msgStr.includes('error');
+
+              platformMap.set(platformName.toLowerCase(), {
+                platform: platformName,
+                found,
+                status: found ? 'found' : rateLimit ? 'rate_limit' : isError ? 'error' : 'not_found',
+                url: item?.url_user || item?.url || '',
+                statusCode: item?.http_status ?? (found ? 200 : rateLimit ? 429 : isError ? 500 : 404),
+                message: statusObj?.message ?? (found ? 'Profile found' : 'No profile found'),
+              });
             }
-            parsedFromFile = true;
+            parsedFromFile = platformMap.size > 0;
           } catch (jsonErr) {
-            console.warn('[Sherlock] JSON file parse failed, falling back to stdout parse:', jsonErr);
-          } finally {
-            try { fs.unlinkSync(jsonOutputPath); } catch (_) { /* ignore */ }
+            console.warn('[Sherlock] JSON file parse failed, falling back to stdout:', jsonErr);
           }
         }
 
         // ── Strategy 2: parse stdout text lines (fallback) ─────────────────
-        if (!parsedFromFile || platformMap.size === 0) {
+        if (!parsedFromFile && stdout) {
           const lines = stdout.split('\n');
           for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed) continue;
 
-            // Sherlock text format: [+] Platform: https://...
-            //                       [-] Platform: Not Found!
-            //                       [!] Platform: <rate limit message>
-            //                       [*] Platform: <error>
+            // Format: [+] Platform: https://site.com/user
+            //         [-] Platform: Not Found!
+            //         [!] Platform: <rate-limit message>
+            //         [*] Platform: <error>
             const match = trimmed.match(/^\[([+\-!*])\]\s*(.*?):\s*(.*)$/);
-            if (match) {
-              const flag = match[1].trim();
-              const platform = match[2].trim();
-              const detail = match[3].trim();
-              if (!platform) continue;
+            if (!match) continue;
 
-              const status =
-                flag === '+' ? 'found'
-                  : flag === '!' ? 'rate_limit'
-                    : flag === '*' ? 'error'
-                      : 'not_found';
+            const flag = match[1].trim();
+            const platform = match[2].trim();
+            const detail = match[3].trim();
+            if (!platform) continue;
 
-              platformMap.set(platform.toLowerCase(), {
-                platform,
-                found: status === 'found',
-                status,
-                url: status === 'found' ? detail : '',
-                statusCode: status === 'found' ? 200 : status === 'rate_limit' ? 429 : status === 'error' ? 500 : 404,
-                message: detail,
-              });
-            }
+            const status =
+              flag === '+' ? 'found'
+                : flag === '!' ? 'rate_limit'
+                  : flag === '*' ? 'error'
+                    : 'not_found';
+
+            platformMap.set(platform.toLowerCase(), {
+              platform,
+              found: status === 'found',
+              status,
+              url: status === 'found' ? detail : '',
+              statusCode: status === 'found' ? 200 : status === 'rate_limit' ? 429 : status === 'error' ? 500 : 404,
+              message: detail,
+            });
           }
         }
 
         results.platforms = Array.from(platformMap.values()).map(normalizePlatform);
-        results.method = 'Local-Sherlock';
-
-      } catch (execError: any) {
-        // Exit code 1 from Sherlock just means "some sites not found" — still parse what we have.
-        // Exit code 2 means argument error — surface it clearly.
-        console.error('[Sherlock] exec error:', {
-          code: execError?.code,
-          cmd: execError?.cmd,
-          stdout: execError?.stdout?.substring(0, 500),
-        });
-
-        if (execError?.code === 2) {
-          // Argument parsing error from Sherlock — means our command is wrong
-          results.method = 'Failed';
-          results.error = `Sherlock argument error (code 2). stdout: ${execError?.stdout?.substring(0, 300)}`;
-        } else {
-          results.method = 'Partial';
-          results.error = 'Sherlock execution encountered an issue';
-        }
-        results.platforms = [];
-
-        // Clean up JSON file in error path too
-        if (fs.existsSync(jsonOutputPath)) {
-          try { fs.unlinkSync(jsonOutputPath); } catch (_) { /* ignore */ }
-        }
+        results.method = parsedFromFile ? 'Local-Sherlock-JSON' : 'Local-Sherlock-Text';
       }
 
-      // Clean up any .txt report Sherlock may have created in cwd
-      const txtReport = path.join(process.cwd(), `${cleanUsername}.txt`);
-      if (fs.existsSync(txtReport)) {
-        try { fs.unlinkSync(txtReport); } catch (_) { /* ignore */ }
+      // ── Clean up tmp folder ────────────────────────────────────────────────
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) { /* ignore */ }
+
+      // Also remove any stray files Sherlock may have dropped in cwd
+      for (const ext of ['.txt', '.csv']) {
+        const stray = path.join(process.cwd(), `${cleanUsername}${ext}`);
+        if (fs.existsSync(stray)) try { fs.unlinkSync(stray); } catch (_) { /* ignore */ }
       }
     }
 
