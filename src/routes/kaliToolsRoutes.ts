@@ -72,9 +72,9 @@ router.post('/whois', protect, whoisLookup);
 
 /**
  * @route   POST /api/kali-tools/nmap
- * @desc    Perform network and port scanning using Nmap
+ * @desc    Network scanning (DEPRECATED)
  * @access  Private
- * @body    { target: string, scanType?: 'basic'|'aggressive'|'stealth', caseId?: string }
+ * @deprecated Use DNS reconnaissance or API-based scanning instead
  */
 router.post('/nmap', protect, nmapScan);
 
