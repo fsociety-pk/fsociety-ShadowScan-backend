@@ -334,6 +334,11 @@ const sherlockStream = async (req, res) => {
       const { spawn: spawn2 } = await import("child_process");
       const proc = spawn2("sherlock", [username, "--timeout", "10", "--print-found"], { stdio: ["ignore", "pipe", "pipe"] });
       const foundPlatforms = [];
+      proc.on("error", (err) => {
+        console.error("[Sherlock Tool] Spawn error:", err);
+        send({ type: "log", message: `[!] Failed to start Sherlock CLI: ${err.message}` });
+        send({ type: "error", message: "Sherlock CLI tools could not be started." });
+      });
       proc.stdout.on("data", (chunk) => {
         const lines = chunk.toString().split("\n");
         for (const line of lines) {

@@ -161,5 +161,26 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/osint-analyst', osintAnalystRoutes);
 app.use('/api/chat', chatRoutes);
 
+// Global Error Handler to capture Multer or process crashes and send them with CORS headers
+app.use((err: any, req: any, res: any, next: any) => {
+  console.error('[Global Error Handler] Caught error:', err);
+
+  const requestOrigin = req.header('Origin');
+  let originToSet = FRONTEND_URL || '*';
+  if (requestOrigin && isAllowedOrigin(requestOrigin)) {
+    originToSet = requestOrigin;
+  }
+
+  res.setHeader('Access-Control-Allow-Origin', originToSet);
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-csrf-token, x-sudo-token, Accept, Origin, X-Requested-With');
+
+  res.status(err.status || 500).json({
+    status: 'error',
+    message: err.message || 'An internal error occurred during the request',
+    details: process.env.NODE_ENV === 'production' ? undefined : err.stack || err
+  });
+});
 
 startServer();

@@ -351,6 +351,12 @@ export const sherlockStream = async (req: Request, res: Response) => {
       const proc = spawn('sherlock', [username, '--timeout', '10', '--print-found'], { stdio: ['ignore', 'pipe', 'pipe'] });
       const foundPlatforms: any[] = [];
 
+      proc.on('error', (err) => {
+        console.error('[Sherlock Tool] Spawn error:', err);
+        send({ type: 'log', message: `[!] Failed to start Sherlock CLI: ${err.message}` });
+        send({ type: 'error', message: 'Sherlock CLI tools could not be started.' });
+      });
+
       proc.stdout.on('data', (chunk: Buffer) => {
         const lines = chunk.toString().split('\n');
         for (const line of lines) {

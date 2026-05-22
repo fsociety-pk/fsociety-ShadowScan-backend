@@ -149,4 +149,21 @@ app.use("/api/intelligence", import_intelligenceReportRoutes.default);
 app.use("/api/admin", import_admin.default);
 app.use("/api/osint-analyst", import_osintAnalystRoutes.default);
 app.use("/api/chat", import_chatRoutes.default);
+app.use((err, req, res, next) => {
+  console.error("[Global Error Handler] Caught error:", err);
+  const requestOrigin = req.header("Origin");
+  let originToSet = FRONTEND_URL || "*";
+  if (requestOrigin && isAllowedOrigin(requestOrigin)) {
+    originToSet = requestOrigin;
+  }
+  res.setHeader("Access-Control-Allow-Origin", originToSet);
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS,PATCH");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-csrf-token, x-sudo-token, Accept, Origin, X-Requested-With");
+  res.status(err.status || 500).json({
+    status: "error",
+    message: err.message || "An internal error occurred during the request",
+    details: process.env.NODE_ENV === "production" ? void 0 : err.stack || err
+  });
+});
 startServer();

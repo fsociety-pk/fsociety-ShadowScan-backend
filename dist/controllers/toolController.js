@@ -560,6 +560,21 @@ const extractMetadata = async (req, res) => {
         }
       }
     }, WATCHDOG_MS);
+    pythonProcess.on("error", (err) => {
+      console.error(`[METADATA_OSINT] Failed to start python process:`, err);
+      if (!isFinished) {
+        isFinished = true;
+        clearTimeout(timeout);
+        cleanup();
+        if (!res.headersSent) {
+          res.status(500).json({
+            status: "error",
+            message: "Failed to start forensic extraction process. Python or required dependencies might not be configured.",
+            error: err.message
+          });
+        }
+      }
+    });
     pythonProcess.stdout.on("data", (data) => {
       outputData += data.toString();
     });
@@ -570,21 +585,29 @@ const extractMetadata = async (req, res) => {
       if (isFinished) return;
       isFinished = true;
       clearTimeout(timeout);
-      cleanup();
       const extractionTime = Date.now() - startTime;
       if (code !== 0) {
         console.error(`[METADATA_OSINT] Process crash [Code ${code}]: ${errorData}`);
         try {
           const parsed = JSON.parse(outputData || "{}");
-          if (!res.headersSent) return res.status(200).json(parsed);
+          if (!res.headersSent) {
+            res.status(200).json(parsed);
+          }
+          cleanup();
         } catch (parseErr) {
           try {
             const exifOut = await execPromise(`exiftool -json -G1 -n "${filePath}"`);
             const parsedExif = JSON.parse(exifOut.stdout || "[]");
             const exifResult = parsedExif[0] || { status: "error", message: "ExifTool returned empty" };
-            if (!res.headersSent) return res.status(200).json({ status: "partial", exif: exifResult, engine_error: errorData });
+            if (!res.headersSent) {
+              res.status(200).json({ status: "partial", exif: exifResult, engine_error: errorData });
+            }
           } catch (exifErr) {
-            if (!res.headersSent) return res.status(500).json({ status: "error", message: "Forensic engine crash and ExifTool fallback failed", error: errorData });
+            if (!res.headersSent) {
+              res.status(500).json({ status: "error", message: "Forensic engine crash and ExifTool fallback failed", error: errorData });
+            }
+          } finally {
+            cleanup();
           }
         }
         return;
@@ -625,6 +648,8 @@ const extractMetadata = async (req, res) => {
           message: "Failed to parse forensic data",
           error: outputData
         });
+      } finally {
+        cleanup();
       }
     });
   } catch (error) {
@@ -662,6 +687,21 @@ const phoneLookupPK = async (req, res) => {
         }
       }
     }, 5e3);
+    pythonProcess.on("error", (err) => {
+      console.error(`[PHONE_OSINT] Failed to start python process:`, err);
+      if (!processFinished) {
+        processFinished = true;
+        clearTimeout(timeoutWatchdog);
+        if (!res.headersSent) {
+          res.status(500).json({
+            status: "error",
+            error: "Process Error",
+            message: "Telephony engine failed to start. Python or dependencies might not be configured.",
+            details: err.message
+          });
+        }
+      }
+    });
     pythonProcess.stdout.on("data", (data) => {
       outputData += data.toString();
     });

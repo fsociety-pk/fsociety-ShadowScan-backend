@@ -656,6 +656,22 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
             }
         }, WATCHDOG_MS);
 
+        pythonProcess.on('error', (err) => {
+            console.error(`[METADATA_OSINT] Failed to start python process:`, err);
+            if (!isFinished) {
+                isFinished = true;
+                clearTimeout(timeout);
+                cleanup();
+                if (!res.headersSent) {
+                    res.status(500).json({
+                        status: 'error',
+                        message: 'Failed to start forensic extraction process. Python or required dependencies might not be configured.',
+                        error: err.message
+                    });
+                }
+            }
+        });
+
         pythonProcess.stdout.on('data', (data) => {
             outputData += data.toString();
         });
@@ -668,7 +684,6 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
             if (isFinished) return;
             isFinished = true;
             clearTimeout(timeout);
-            cleanup();
 
             const extractionTime = Date.now() - startTime;
 
@@ -677,16 +692,25 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
                 // Try to parse any JSON the engine emitted before crashing
                 try {
                     const parsed = JSON.parse(outputData || '{}');
-                    if (!res.headersSent) return res.status(200).json(parsed);
+                    if (!res.headersSent) {
+                        res.status(200).json(parsed);
+                    }
+                    cleanup();
                 } catch (parseErr) {
                     // Fallback: try ExifTool directly so the user still gets something
                     try {
                         const exifOut = await execPromise(`exiftool -json -G1 -n "${filePath}"`);
                         const parsedExif = JSON.parse(exifOut.stdout || '[]');
                         const exifResult = parsedExif[0] || { status: 'error', message: 'ExifTool returned empty' };
-                        if (!res.headersSent) return res.status(200).json({ status: 'partial', exif: exifResult, engine_error: errorData });
+                        if (!res.headersSent) {
+                            res.status(200).json({ status: 'partial', exif: exifResult, engine_error: errorData });
+                        }
                     } catch (exifErr) {
-                        if (!res.headersSent) return res.status(500).json({ status: 'error', message: 'Forensic engine crash and ExifTool fallback failed', error: errorData });
+                        if (!res.headersSent) {
+                            res.status(500).json({ status: 'error', message: 'Forensic engine crash and ExifTool fallback failed', error: errorData });
+                        }
+                    } finally {
+                        cleanup();
                     }
                 }
                 return;
@@ -732,6 +756,8 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
                     message: 'Failed to parse forensic data',
                     error: outputData
                 });
+            } finally {
+                cleanup();
             }
         });
 
@@ -784,6 +810,22 @@ export const phoneLookupPK = async (req: Request, res: Response): Promise<void> 
                 }
             }
         }, 5000);
+
+        pythonProcess.on('error', (err) => {
+            console.error(`[PHONE_OSINT] Failed to start python process:`, err);
+            if (!processFinished) {
+                processFinished = true;
+                clearTimeout(timeoutWatchdog);
+                if (!res.headersSent) {
+                    res.status(500).json({
+                        status: 'error',
+                        error: 'Process Error',
+                        message: 'Telephony engine failed to start. Python or dependencies might not be configured.',
+                        details: err.message
+                    });
+                }
+            }
+        });
 
         pythonProcess.stdout.on('data', (data) => {
             outputData += data.toString();
