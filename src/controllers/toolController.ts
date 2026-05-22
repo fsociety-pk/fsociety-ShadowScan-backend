@@ -55,9 +55,40 @@ const extractUsernames = (email: string): string[] => {
  */
 // Helper to find Python path (venv or system)
 const getPythonPath = (): string => {
+    if (process.env.METADATA_PYTHON_PATH && process.env.METADATA_PYTHON_PATH.trim()) {
+        return process.env.METADATA_PYTHON_PATH.trim();
+    }
     const venvPath = path.join(__dirname, '../../venv/bin/python');
     if (fs.existsSync(venvPath)) return venvPath;
+    const localVenvPath = path.join(process.cwd(), 'venv/bin/python');
+    if (fs.existsSync(localVenvPath)) return localVenvPath;
     return 'python3';
+};
+
+const parseJsonFromProcessOutput = (stdout: string, stderr: string): any | null => {
+    const candidates = [stdout, stderr, `${stdout}\n${stderr}`];
+
+    for (const blob of candidates) {
+        const trimmed = (blob || '').trim();
+        if (!trimmed) continue;
+
+        try {
+            return JSON.parse(trimmed);
+        } catch {
+            // Try extracting the last JSON object block when logs surround payload.
+            const start = trimmed.lastIndexOf('{');
+            if (start >= 0) {
+                const maybeJson = trimmed.slice(start);
+                try {
+                    return JSON.parse(maybeJson);
+                } catch {
+                    // continue
+                }
+            }
+        }
+    }
+
+    return null;
 };
 
 const getEmailProviderType = (email: string): 'corporate' | 'webmail' | 'disposable' => {
@@ -638,8 +669,8 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
         let errorData = '';
         let isFinished = false;
 
-        // Watchdog Timer (configurable via METADATA_TIMEOUT_MS, default 60s)
-        const WATCHDOG_MS = parseInt(process.env.METADATA_TIMEOUT_MS || '') || 60000;
+        // Watchdog Timer (configurable via METADATA_TIMEOUT_MS, default 90s)
+        const WATCHDOG_MS = parseInt(process.env.METADATA_TIMEOUT_MS || '') || 90000;
         const timeout = setTimeout(() => {
             if (!isFinished) {
                 isFinished = true;
@@ -691,7 +722,7 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
                 console.error(`[METADATA_OSINT] Process crash [Code ${code}]: ${errorData}`);
                 // Try to parse any JSON the engine emitted before crashing
                 try {
-                    const parsed = JSON.parse(outputData || '{}');
+                    const parsed = parseJsonFromProcessOutput(outputData, errorData) || {};
                     if (!res.headersSent) {
                         res.status(200).json(parsed);
                     }
@@ -717,7 +748,10 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
             }
 
             try {
-                const result = JSON.parse(outputData);
+                const result = parseJsonFromProcessOutput(outputData, errorData);
+                if (!result) {
+                    throw new Error('No valid JSON emitted by metadata engine');
+                }
                 console.log(`[METADATA_OSINT] Success: ${filename} processed in ${extractionTime}ms`);
 
                 // LOGGING ACTION
@@ -754,7 +788,7 @@ export const extractMetadata = async (req: Request, res: Response): Promise<void
                 res.status(500).json({
                     status: 'error',
                     message: 'Failed to parse forensic data',
-                    error: outputData
+                    error: errorData || outputData
                 });
             } finally {
                 cleanup();

@@ -9,6 +9,13 @@ import Finding from '../models/Finding';
 
 const execPromise = promisify(exec);
 
+interface SherlockExecResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  timedOut: boolean;
+}
+
 interface AuthRequest extends Request {
   user?: any;
 }
@@ -53,6 +60,46 @@ const normalizePlatform = (item: any) => {
       : status === 'found' ? 200 : status === 'rate_limit' ? 429 : status === 'error' ? 500 : 404,
     message: item?.message || item?.detail || item?.note || '',
   };
+};
+
+const runSherlockCommand = (args: string[], timeoutMs: number): Promise<SherlockExecResult> => {
+  return new Promise((resolve) => {
+    const proc = spawn('sherlock', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env,
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+
+    const watchdog = setTimeout(() => {
+      timedOut = true;
+      try {
+        proc.kill('SIGKILL');
+      } catch (_) {
+        // no-op
+      }
+    }, timeoutMs);
+
+    proc.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+
+    proc.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on('error', (err) => {
+      clearTimeout(watchdog);
+      resolve({ stdout, stderr: `${stderr}\n${err.message}`.trim(), exitCode: 127, timedOut });
+    });
+
+    proc.on('close', (code) => {
+      clearTimeout(watchdog);
+      resolve({ stdout, stderr, exitCode: code ?? 1, timedOut });
+    });
+  });
 };
 
 // ── Sherlock ──────────────────────────────────────────────────────────────────
@@ -184,37 +231,49 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
 
       // stdout captured from both success and code-1 exits
       let stdout = '';
+      let stderr = '';
 
-      try {
-        const execResult = await execPromise(
-          `sherlock "${cleanUsername}" --print-all --folderoutput "${tmpDir}" --no-color 2>&1`,
-          { maxBuffer: 10 * 1024 * 1024, timeout: 120000 }
-        );
-        stdout = execResult.stdout;
-      } catch (execError: any) {
-        // code 1  → normal "some not found" exit — stdout still has full results
-        // code 2  → argument error — nothing useful in stdout
-        // other   → network/timeout issue
-        stdout = execError?.stdout ?? '';
+      const perSiteTimeoutSec = parseInt(process.env.SHERLOCK_SITE_TIMEOUT_SEC || '', 10) || 8;
+      const commandTimeoutMs = parseInt(process.env.SHERLOCK_COMMAND_TIMEOUT_MS || '', 10) || 90000;
 
-        if (execError?.code === 2) {
-          console.error('[Sherlock] Argument error (code 2):', execError?.stdout?.substring(0, 400));
-          results.method = 'Failed';
-          results.error = `Sherlock CLI argument error. Raw: ${execError?.stdout?.substring(0, 300)}`;
-          results.platforms = [];
-          try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) { /* ignore */ }
-          // Skip to response — fall through to the summary block below
-        } else if (!stdout) {
-          console.error('[Sherlock] exec error (no stdout):', {
-            code: execError?.code,
-            message: execError?.message,
-          });
-          results.method = 'Failed';
-          results.error = 'Sherlock execution failed with no output';
-          results.platforms = [];
-          try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) { /* ignore */ }
+      const sherlockVariants: string[][] = [
+        [cleanUsername, '--print-all', '--folderoutput', tmpDir, '--no-color', '--timeout', String(perSiteTimeoutSec)],
+        [cleanUsername, '--print-all', '--folderoutput', tmpDir, '--timeout', String(perSiteTimeoutSec)],
+        [cleanUsername, '--print-found', '--folderoutput', tmpDir, '--no-color', '--timeout', String(perSiteTimeoutSec)],
+      ];
+
+      let ranVariant = false;
+      for (const args of sherlockVariants) {
+        const run = await runSherlockCommand(args, commandTimeoutMs);
+        stdout = run.stdout;
+        stderr = run.stderr;
+
+        // 0 => success, 1 => normal Sherlock partial/not-found exits
+        if (!run.timedOut && (run.exitCode === 0 || run.exitCode === 1)) {
+          ranVariant = true;
+          break;
         }
-        // If stdout is present (code 1), we continue parsing below
+
+        // Stop retrying variants if command timed out; this is operational, not syntax.
+        if (run.timedOut) {
+          results.method = 'Failed';
+          results.error = `Sherlock timed out after ${commandTimeoutMs}ms. Try increasing SHERLOCK_COMMAND_TIMEOUT_MS.`;
+          results.platforms = [];
+          break;
+        }
+
+        // If we still got useful stdout, continue parsing it instead of failing hard.
+        if (stdout.trim().length > 0) {
+          ranVariant = true;
+          break;
+        }
+      }
+
+      if (!results.error && !ranVariant && !stdout.trim()) {
+        console.error('[Sherlock] failed to execute any variant', { stderr: stderr.substring(0, 400) });
+        results.method = 'Failed';
+        results.error = `Sherlock execution failed. ${stderr.substring(0, 220) || 'No output from command.'}`;
+        results.platforms = [];
       }
 
       // Only attempt to parse if we don't already have a hard failure
@@ -467,7 +526,8 @@ export const sherlockStream = async (req: Request, res: Response) => {
 
     } else {
       // ── Primary: local Sherlock with live stdout streaming ─────────────────
-      const proc = spawn('sherlock', [cleanUsername, '--timeout', '10', '--print-found'], {
+      const siteTimeoutSec = parseInt(process.env.SHERLOCK_SITE_TIMEOUT_SEC || '', 10) || 8;
+      const proc = spawn('sherlock', [cleanUsername, '--timeout', String(siteTimeoutSec), '--print-found', '--no-color'], {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 
