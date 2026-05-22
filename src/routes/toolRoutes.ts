@@ -5,7 +5,6 @@ import path from 'path';
 import { 
     emailLookup, 
     usernameLookup, 
-    extractMetadata, 
     phoneLookupPK, 
     networkRecon, 
     nexusOSINTLookup,
@@ -46,9 +45,6 @@ router.post('/email-lookup', emailLookup);
 
 // Username Intelligence
 router.post('/username-lookup', usernameLookup);
-
-// Metadata Forensic Extraction
-router.post('/extract-metadata', upload.single('file'), extractMetadata);
 
 // Pakistan Phone Intelligence
 router.post('/phone-lookup-pk', phoneLookupPK);

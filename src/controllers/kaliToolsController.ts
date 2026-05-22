@@ -342,6 +342,17 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
             const detail = match[3].trim();
             if (!platform) continue;
 
+            const platformLower = platform.toLowerCase();
+            if (
+              platformLower.startsWith('checking username')
+              || platformLower.startsWith('searching')
+              || platformLower.startsWith('results')
+              || platformLower.includes('saved in')
+              || platformLower.includes('sites checked')
+            ) {
+              continue;
+            }
+
             const status =
               flag === '+' ? 'found'
                 : flag === '!' ? 'rate_limit'
