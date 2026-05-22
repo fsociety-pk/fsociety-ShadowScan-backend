@@ -665,7 +665,18 @@ export const whoisLookup = async (req: AuthRequest, res: Response) => {
     tool: 'Whois',
     target: cleanTarget,
     timestamp: new Date(),
+    rawWhois: '',
     data: {},
+    dns: {
+      nslookup: '',
+      dig: '',
+      host: '',
+      availableTools: {
+        nslookup: false,
+        dig: false,
+        host: false,
+      },
+    },
     summary: {
       registrar: null,
       registrationDate: null,
@@ -681,11 +692,78 @@ export const whoisLookup = async (req: AuthRequest, res: Response) => {
   try {
     const hasWhois = await toolExists('whois');
 
+    // DNS reconnaissance using lightweight native tools (nslookup, dig, host)
+    const [hasNslookup, hasDig, hasHost] = await Promise.all([
+      toolExists('nslookup'),
+      toolExists('dig'),
+      toolExists('host'),
+    ]);
+
+    results.dns.availableTools = {
+      nslookup: hasNslookup,
+      dig: hasDig,
+      host: hasHost,
+    };
+
+    const dnsOutputs: string[] = [];
+
+    if (hasNslookup) {
+      try {
+        const { stdout } = await execPromise(`nslookup "${cleanTarget}" 2>&1`, {
+          maxBuffer: 2 * 1024 * 1024,
+          timeout: 12000,
+        });
+        results.dns.nslookup = stdout;
+        dnsOutputs.push(stdout);
+      } catch (e: any) {
+        results.dns.nslookup = `${e?.stdout || ''}\n${e?.stderr || ''}`.trim();
+      }
+    }
+
+    if (hasDig) {
+      try {
+        const { stdout } = await execPromise(`dig "${cleanTarget}" +short && echo "---" && dig "${cleanTarget}" ANY +noall +answer 2>&1`, {
+          maxBuffer: 3 * 1024 * 1024,
+          timeout: 15000,
+        });
+        results.dns.dig = stdout;
+        dnsOutputs.push(stdout);
+      } catch (e: any) {
+        results.dns.dig = `${e?.stdout || ''}\n${e?.stderr || ''}`.trim();
+      }
+    }
+
+    if (hasHost) {
+      try {
+        const { stdout } = await execPromise(`host "${cleanTarget}" 2>&1`, {
+          maxBuffer: 2 * 1024 * 1024,
+          timeout: 12000,
+        });
+        results.dns.host = stdout;
+        dnsOutputs.push(stdout);
+      } catch (e: any) {
+        results.dns.host = `${e?.stdout || ''}\n${e?.stderr || ''}`.trim();
+      }
+    }
+
+    const discoveredNameServers = new Set<string>();
+    for (const blob of dnsOutputs) {
+      for (const line of blob.split('\n')) {
+        const nsMatch = line.match(/\bns\d+\.[\w.-]+\b/i) || line.match(/name\s*server\s*=\s*([\w.-]+)/i);
+        if (nsMatch?.[1]) discoveredNameServers.add(nsMatch[1].toLowerCase());
+        else if (nsMatch?.[0]) discoveredNameServers.add(nsMatch[0].toLowerCase());
+      }
+    }
+
     if (!hasWhois) {
       return res.status(200).json({
         ...results,
-        method: 'Unavailable',
-        message: 'Whois not installed. Install with: apt-get install whois',
+        method: 'DNS-Only',
+        summary: {
+          ...results.summary,
+          nameServers: Array.from(discoveredNameServers),
+        },
+        message: 'Whois not installed. Returned DNS data from nslookup/dig/host.',
       });
     }
 
@@ -694,6 +772,8 @@ export const whoisLookup = async (req: AuthRequest, res: Response) => {
         `whois "${cleanTarget}" 2>&1`,
         { maxBuffer: 5 * 1024 * 1024, timeout: 15000 }
       );
+
+      results.rawWhois = stdout;
 
       const data: Record<string, string> = {};
       for (const line of stdout.split('\n')) {
@@ -723,6 +803,12 @@ export const whoisLookup = async (req: AuthRequest, res: Response) => {
         email: data['Email'] || data['email'] || data['admin-email'] || null,
         phone: data['Phone'] || data['phone'] || data['admin-phone'] || null,
       };
+
+      // Merge in nameservers discovered through nslookup/dig/host
+      results.summary.nameServers = Array.from(new Set([
+        ...results.summary.nameServers,
+        ...Array.from(discoveredNameServers),
+      ]));
     } catch (execError: any) {
       console.error('[Whois] exec error:', execError);
       results.method = 'Failed';

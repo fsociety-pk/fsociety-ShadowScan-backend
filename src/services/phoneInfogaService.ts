@@ -30,6 +30,13 @@ export interface PhoneInfogaResult {
     reputationReports: string[];
     socialMediaHints: string[];
     disposableIndicators: string[];
+        buckets?: {
+            socialMedia: string[];
+            disposableProviders: string[];
+            reputation: string[];
+            individuals: string[];
+            general: string[];
+        };
   };
   sources: string[];
   success: boolean;
@@ -225,6 +232,43 @@ const runPhoneInfogaCli = async (binary: string, cleanPhone: string): Promise<Ph
             const positiveExists = /valid|exists|found|reachable/i.test(combined);
             const exists = negativeExists ? false : (positiveExists ? true : cleanPhone.length >= 8);
 
+            // Parse structured category URLs from PhoneInfoga's text output
+            const lines = combined.split('\n').map((line) => line.trim()).filter(Boolean);
+            const buckets: {
+                socialMedia: string[];
+                disposableProviders: string[];
+                reputation: string[];
+                individuals: string[];
+                general: string[];
+            } = {
+                socialMedia: [],
+                disposableProviders: [],
+                reputation: [],
+                individuals: [],
+                general: [],
+            };
+
+            let currentBucket: keyof typeof buckets | null = null;
+            for (const line of lines) {
+                if (/^social\s+media\s*:/i.test(line)) { currentBucket = 'socialMedia'; continue; }
+                if (/^disposable\s+providers\s*:/i.test(line)) { currentBucket = 'disposableProviders'; continue; }
+                if (/^reputation\s*:/i.test(line)) { currentBucket = 'reputation'; continue; }
+                if (/^individuals\s*:/i.test(line)) { currentBucket = 'individuals'; continue; }
+                if (/^general\s*:/i.test(line)) { currentBucket = 'general'; continue; }
+
+                const urlMatch = line.match(/URL\s*:\s*(https?:\/\/\S+)/i) || line.match(/(https?:\/\/\S+)/i);
+                if (currentBucket && urlMatch?.[1]) {
+                    buckets[currentBucket].push(urlMatch[1]);
+                }
+            }
+
+            const dedupe = (arr: string[]) => Array.from(new Set(arr));
+            buckets.socialMedia = dedupe(buckets.socialMedia);
+            buckets.disposableProviders = dedupe(buckets.disposableProviders);
+            buckets.reputation = dedupe(buckets.reputation);
+            buckets.individuals = dedupe(buckets.individuals);
+            buckets.general = dedupe(buckets.general);
+
             return {
                 country_code: countryCode,
                 country,
@@ -234,7 +278,16 @@ const runPhoneInfogaCli = async (binary: string, cleanPhone: string): Promise<Ph
                 line_type: lineType,
                 exists,
                 reputation: buildReputation(cleanPhone, carrier, lineType),
-                footprint: buildFootprint(cleanPhone, country, carrier),
+                footprint: {
+                    ...buildFootprint(cleanPhone, country, carrier),
+                    // Align PhoneInfoga category output with UI categories
+                    socialMediaHints: buckets.socialMedia.length > 0 ? buckets.socialMedia : buildFootprint(cleanPhone, country, carrier).socialMediaHints,
+                    disposableIndicators: buckets.disposableProviders.length > 0 ? buckets.disposableProviders : buildFootprint(cleanPhone, country, carrier).disposableIndicators,
+                    reputationReports: buckets.reputation.length > 0 ? buckets.reputation : buildFootprint(cleanPhone, country, carrier).reputationReports,
+                    phoneBooks: buckets.individuals.length > 0 ? buckets.individuals : buildFootprint(cleanPhone, country, carrier).phoneBooks,
+                    searchEngines: buckets.general.length > 0 ? buckets.general : buildFootprint(cleanPhone, country, carrier).searchEngines,
+                    buckets,
+                },
                 sources: ['PhoneInfoga CLI binary', 'Carrier metadata'],
                 success: true,
             };
