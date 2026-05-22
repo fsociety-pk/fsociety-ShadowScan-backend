@@ -1,6 +1,8 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import Groq from 'groq-sdk';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_KEY }) : null;
 
 const candidateModels = [
     process.env.GEMINI_MODEL,
@@ -8,6 +10,8 @@ const candidateModels = [
     'gemini-1.5-flash',
     'gemini-1.5-pro',
 ].filter((model): model is string => Boolean(model));
+
+const groqModel = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 
 const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> => {
     return new Promise<T>((resolve, reject) => {
@@ -23,6 +27,61 @@ const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, message: string)
             }
         );
     });
+};
+
+const parseStructuredJson = (responseText: string): { markdownContent: string; visualReport: VisualReportFromAI } => {
+    const cleanJson = responseText
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/```\s*$/i, '')
+        .trim();
+
+    const parsed = JSON.parse(cleanJson);
+    if (!parsed.markdownContent || !parsed.visualReport) {
+        throw new Error('LLM response missing required fields');
+    }
+
+    if (parsed.visualReport.relationshipGraph?.nodes) {
+        parsed.visualReport.relationshipGraph.nodes = parsed.visualReport.relationshipGraph.nodes.map((n: any) => ({
+            ...n,
+            color: n.color || getColor(n.type || 'default'),
+        }));
+    }
+
+    return {
+        markdownContent: parsed.markdownContent,
+        visualReport: parsed.visualReport,
+    };
+};
+
+const isQuotaOrRateError = (message: string): boolean => /quota|429|resource exhausted|rate limit|too many requests/i.test(message);
+
+const generateWithGroq = async (prompt: string, timeoutMs: number): Promise<GeminiReportResult> => {
+    if (!groq) {
+        throw new Error('Groq API key not configured');
+    }
+
+    const completion = await withTimeout(
+        groq.chat.completions.create({
+            model: groqModel,
+            temperature: 0.15,
+            max_tokens: 6000,
+            response_format: { type: 'json_object' },
+            messages: [
+                { role: 'system', content: GEMINI_SYSTEM_PROMPT },
+                { role: 'user', content: prompt },
+            ],
+        }),
+        timeoutMs,
+        `Groq generation timed out after ${timeoutMs}ms`
+    );
+
+    const responseText = completion.choices?.[0]?.message?.content?.trim() || '';
+    if (!responseText) {
+        throw new Error(`Empty response from Groq model ${groqModel}`);
+    }
+
+    return parseStructuredJson(responseText);
 };
 
 export interface VisualReportFromAI {
@@ -249,6 +308,7 @@ export const generateFullReport = async (
     const prompt = buildPrompt(caseTitle, rawFindings, targetProfile);
     let lastError: unknown;
     const generationTimeoutMs = Number(process.env.GEMINI_TIMEOUT_MS || 25000);
+    let shouldTryGroq = false;
 
     for (const modelName of candidateModels) {
         try {
@@ -269,46 +329,37 @@ export const generateFullReport = async (
                 lastError = new Error(`Empty response from ${modelName}`);
                 continue;
             }
-
-            // Strip markdown code fences if present
-            const cleanJson = responseText
-                .replace(/^```json\s*/i, '')
-                .replace(/^```\s*/i, '')
-                .replace(/```\s*$/i, '')
-                .trim();
-
-            const parsed = JSON.parse(cleanJson);
-
-            // Validate required fields
-            if (!parsed.markdownContent || !parsed.visualReport) {
-                throw new Error('Gemini response missing required fields');
-            }
-
-            // Inject colors into nodes based on type if missing
-            if (parsed.visualReport.relationshipGraph?.nodes) {
-                parsed.visualReport.relationshipGraph.nodes = parsed.visualReport.relationshipGraph.nodes.map((n: any) => ({
-                    ...n,
-                    color: n.color || getColor(n.type || 'default'),
-                }));
-            }
+            const parsed = parseStructuredJson(responseText);
 
             console.log(`[ReportService] Gemini (${modelName}) returned structured report successfully`);
-            return {
-                markdownContent: parsed.markdownContent,
-                visualReport: parsed.visualReport,
-            };
+            return parsed;
         } catch (error) {
             lastError = error;
             const message = error instanceof Error ? error.message : String(error);
             console.error(`[ReportService] Model ${modelName} failed:`, message);
+            if (isQuotaOrRateError(message)) {
+                shouldTryGroq = true;
+            }
             if (!/404|not found|unsupported/i.test(message)) {
-                // Non-model-not-found error — use fallback
+                // Non-model-not-found error — try Groq if configured, otherwise fallback
                 break;
             }
         }
     }
 
-    console.warn('[ReportService] All Gemini models failed. Using intelligent fallback.', lastError);
+    if (groq && (shouldTryGroq || !!process.env.GROQ_API_KEY)) {
+        try {
+            const groqResult = await generateWithGroq(prompt, Number(process.env.GROQ_TIMEOUT_MS || generationTimeoutMs));
+            console.log(`[ReportService] Fallback model Groq (${groqModel}) returned structured report successfully`);
+            return groqResult;
+        } catch (groqError) {
+            lastError = groqError;
+            const message = groqError instanceof Error ? groqError.message : String(groqError);
+            console.error(`[ReportService] Groq fallback failed (${groqModel}):`, message);
+        }
+    }
+
+    console.warn('[ReportService] Gemini/Groq models failed. Using intelligent fallback.', lastError);
     const fallback = buildFallbackVisual(caseTitle, rawFindings, targetProfile);
     return {
         markdownContent: `# Intelligence Report: ${caseTitle}\n\n## Summary\n${fallback.summary}\n\n## Raw Findings\n${rawFindings}`,

@@ -102,6 +102,73 @@ const runSherlockCommand = (args: string[], timeoutMs: number): Promise<Sherlock
   });
 };
 
+const SHERLOCK_FALLBACK_PLATFORMS = [
+  { name: 'GitHub', pattern: (u: string) => `https://github.com/${u}` },
+  { name: 'Twitter', pattern: (u: string) => `https://twitter.com/${u}` },
+  { name: 'Instagram', pattern: (u: string) => `https://instagram.com/${u}` },
+  { name: 'Reddit', pattern: (u: string) => `https://reddit.com/user/${u}` },
+  { name: 'LinkedIn', pattern: (u: string) => `https://linkedin.com/in/${u}` },
+  { name: 'TikTok', pattern: (u: string) => `https://tiktok.com/@${u}` },
+  { name: 'Facebook', pattern: (u: string) => `https://facebook.com/${u}` },
+  { name: 'YouTube', pattern: (u: string) => `https://youtube.com/@${u}` },
+  { name: 'Twitch', pattern: (u: string) => `https://twitch.tv/${u}` },
+  { name: 'Pinterest', pattern: (u: string) => `https://pinterest.com/${u}` },
+  { name: 'DeviantArt', pattern: (u: string) => `https://deviantart.com/${u}` },
+  { name: 'Keybase', pattern: (u: string) => `https://keybase.io/${u}` },
+  { name: 'Medium', pattern: (u: string) => `https://medium.com/@${u}` },
+  { name: 'Telegram', pattern: (u: string) => `https://t.me/${u}` },
+  { name: 'Steam', pattern: (u: string) => `https://steamcommunity.com/id/${u}` },
+  { name: 'GitLab', pattern: (u: string) => `https://gitlab.com/${u}` },
+  { name: 'HackerNews', pattern: (u: string) => `https://news.ycombinator.com/user?id=${u}` },
+  { name: 'Replit', pattern: (u: string) => `https://replit.com/@${u}` },
+  { name: 'Codepen', pattern: (u: string) => `https://codepen.io/${u}` },
+  { name: 'NPM', pattern: (u: string) => `https://npmjs.com/~${u}` },
+];
+
+const runSherlockFallbackProbes = async (cleanUsername: string) => {
+  const probeResults = await Promise.allSettled(
+    SHERLOCK_FALLBACK_PLATFORMS.map(async (platform) => {
+      const url = platform.pattern(cleanUsername);
+      try {
+        const response = await axios.head(url, {
+          timeout: 4000,
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          maxRedirects: 2,
+          validateStatus: (s) => s < 500,
+        });
+        const found = response.status === 200 || response.status === 301 || response.status === 302;
+        return {
+          platform: platform.name,
+          url,
+          status: found ? 'found' : 'not_found',
+          statusCode: response.status,
+          message: found ? 'Profile found' : 'No profile found',
+        };
+      } catch {
+        return {
+          platform: platform.name,
+          url,
+          status: 'not_found',
+          statusCode: 404,
+          message: 'No profile found',
+        };
+      }
+    })
+  );
+
+  return probeResults.map((r) =>
+    r.status === 'fulfilled'
+      ? r.value
+      : {
+        platform: 'Unknown',
+        url: '',
+        status: 'error',
+        statusCode: 500,
+        message: 'Probe failed',
+      }
+  );
+};
+
 // ── Sherlock ──────────────────────────────────────────────────────────────────
 
 /**
@@ -142,67 +209,7 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
 
     if (!hasSherlock) {
       // ── Fallback: direct HTTP HEAD probes ──────────────────────────────────
-      const FALLBACK_PLATFORMS = [
-        { name: 'GitHub', pattern: `https://github.com/${cleanUsername}` },
-        { name: 'Twitter', pattern: `https://twitter.com/${cleanUsername}` },
-        { name: 'Instagram', pattern: `https://instagram.com/${cleanUsername}` },
-        { name: 'Reddit', pattern: `https://reddit.com/user/${cleanUsername}` },
-        { name: 'LinkedIn', pattern: `https://linkedin.com/in/${cleanUsername}` },
-        { name: 'TikTok', pattern: `https://tiktok.com/@${cleanUsername}` },
-        { name: 'Facebook', pattern: `https://facebook.com/${cleanUsername}` },
-        { name: 'YouTube', pattern: `https://youtube.com/@${cleanUsername}` },
-        { name: 'Twitch', pattern: `https://twitch.tv/${cleanUsername}` },
-        { name: 'Pinterest', pattern: `https://pinterest.com/${cleanUsername}` },
-        { name: 'DeviantArt', pattern: `https://deviantart.com/${cleanUsername}` },
-        { name: 'Keybase', pattern: `https://keybase.io/${cleanUsername}` },
-        { name: 'Medium', pattern: `https://medium.com/@${cleanUsername}` },
-        { name: 'Telegram', pattern: `https://t.me/${cleanUsername}` },
-        { name: 'Steam', pattern: `https://steamcommunity.com/id/${cleanUsername}` },
-        { name: 'GitLab', pattern: `https://gitlab.com/${cleanUsername}` },
-        { name: 'HackerNews', pattern: `https://news.ycombinator.com/user?id=${cleanUsername}` },
-        { name: 'Replit', pattern: `https://replit.com/@${cleanUsername}` },
-        { name: 'Codepen', pattern: `https://codepen.io/${cleanUsername}` },
-        { name: 'NPM', pattern: `https://npmjs.com/~${cleanUsername}` },
-      ];
-
-      const probeResults = await Promise.allSettled(
-        FALLBACK_PLATFORMS.map(async (p) => {
-          try {
-            const response = await axios.head(p.pattern, {
-              timeout: 5000,
-              headers: { 'User-Agent': 'Mozilla/5.0' },
-              maxRedirects: 2,
-              validateStatus: (s) => s < 500,
-            });
-            const found = response.status === 200 || response.status === 301 || response.status === 302;
-            return {
-              platform: p.name,
-              url: p.pattern,
-              status: found ? 'found' : 'not_found',
-              statusCode: response.status,
-              message: found ? 'Profile found' : 'No profile found',
-            };
-          } catch {
-            return {
-              platform: p.name,
-              url: p.pattern,
-              status: 'not_found',
-              statusCode: 404,
-              message: 'No profile found',
-            };
-          }
-        })
-      );
-
-      results.platforms = probeResults.map((r) =>
-        r.status === 'fulfilled' ? r.value : {
-          platform: 'Unknown',
-          url: '',
-          status: 'error',
-          statusCode: 500,
-          message: 'Probe failed',
-        }
-      );
+      results.platforms = await runSherlockFallbackProbes(cleanUsername);
       results.method = 'API-Fallback';
 
     } else {
@@ -233,8 +240,9 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
       let stdout = '';
       let stderr = '';
 
-      const perSiteTimeoutSec = parseInt(process.env.SHERLOCK_SITE_TIMEOUT_SEC || '', 10) || 8;
+      const perSiteTimeoutSec = parseInt(process.env.SHERLOCK_SITE_TIMEOUT_SEC || '', 10) || 6;
       const commandTimeoutMs = parseInt(process.env.SHERLOCK_COMMAND_TIMEOUT_MS || '', 10) || 90000;
+      let localTimedOut = false;
 
       const sherlockVariants: string[][] = [
         [cleanUsername, '--print-all', '--folderoutput', tmpDir, '--no-color', '--timeout', String(perSiteTimeoutSec)],
@@ -256,9 +264,7 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
 
         // Stop retrying variants if command timed out; this is operational, not syntax.
         if (run.timedOut) {
-          results.method = 'Failed';
-          results.error = `Sherlock timed out after ${commandTimeoutMs}ms. Try increasing SHERLOCK_COMMAND_TIMEOUT_MS.`;
-          results.platforms = [];
+          localTimedOut = true;
           break;
         }
 
@@ -270,10 +276,15 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
       }
 
       if (!results.error && !ranVariant && !stdout.trim()) {
-        console.error('[Sherlock] failed to execute any variant', { stderr: stderr.substring(0, 400) });
-        results.method = 'Failed';
-        results.error = `Sherlock execution failed. ${stderr.substring(0, 220) || 'No output from command.'}`;
-        results.platforms = [];
+        if (localTimedOut) {
+          results.platforms = await runSherlockFallbackProbes(cleanUsername);
+          results.method = 'API-Fallback-Timeout';
+        } else {
+          console.error('[Sherlock] failed to execute any variant', { stderr: stderr.substring(0, 400) });
+          results.method = 'Failed';
+          results.error = `Sherlock execution failed. ${stderr.substring(0, 220) || 'No output from command.'}`;
+          results.platforms = [];
+        }
       }
 
       // Only attempt to parse if we don't already have a hard failure
@@ -371,7 +382,12 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
         }
 
         results.platforms = Array.from(platformMap.values()).map(normalizePlatform);
-        results.method = parsedFromFile ? 'Local-Sherlock-JSON' : 'Local-Sherlock-Text';
+        if (results.platforms.length === 0 && localTimedOut) {
+          results.platforms = await runSherlockFallbackProbes(cleanUsername);
+          results.method = 'API-Fallback-Timeout';
+        } else {
+          results.method = parsedFromFile ? 'Local-Sherlock-JSON' : 'Local-Sherlock-Text';
+        }
       }
 
       // ── Clean up tmp folder ────────────────────────────────────────────────

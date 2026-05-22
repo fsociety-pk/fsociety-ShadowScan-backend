@@ -232,46 +232,95 @@ const probePlatform = async (username: string, platformName: string): Promise<{ 
  * Holehe: Advanced Email OSINT tool integration
  */
 const lookupHolehe = async (email: string): Promise<{ raw: string; sites: { domain: string; status: 'found' | 'not_found' | 'rate_limit' | 'error' }[] } | null> => {
-    try {
-        // Use API-based email verification instead of CLI tool
-        // Query common platforms via API
-        const PLATFORMS = [
-            { domain: 'google.com', name: 'Google' },
-            { domain: 'facebook.com', name: 'Facebook' },
-            { domain: 'twitter.com', name: 'Twitter' },
-            { domain: 'instagram.com', name: 'Instagram' },
-            { domain: 'linkedin.com', name: 'LinkedIn' },
-            { domain: 'github.com', name: 'GitHub' },
-            { domain: 'reddit.com', name: 'Reddit' },
-            { domain: 'amazon.com', name: 'Amazon' },
-            { domain: 'microsoft.com', name: 'Microsoft' },
-            { domain: 'apple.com', name: 'Apple' },
-        ];
+    const statusFromPrefix = (line: string): 'found' | 'not_found' | 'rate_limit' | 'error' => {
+        if (line.startsWith('[+]')) return 'found';
+        if (line.startsWith('[x]')) return 'rate_limit';
+        if (line.startsWith('[!]') || line.startsWith('[*]') || /error|exception|failed/i.test(line)) return 'error';
+        if (line.startsWith('[-]')) return 'not_found';
+        return /found|used|registered|exists/i.test(line) ? 'found' : 'not_found';
+    };
 
+    const extractServiceName = (line: string): string => {
+        const cleaned = line.replace(/^\[[+\-!*]\]\s*/, '').trim();
+        const beforeColon = cleaned.split(':')[0]?.trim() || cleaned;
+        if (!beforeColon) return '';
+
+        const domainMatch = beforeColon.match(/([a-z0-9][a-z0-9.-]+\.[a-z]{2,})/i);
+        if (domainMatch) return domainMatch[1].toLowerCase();
+
+        return beforeColon
+            .toLowerCase()
+            .replace(/\s+/g, '_')
+            .replace(/[^a-z0-9_.-]/g, '')
+            .slice(0, 80);
+    };
+
+    try {
+        const timeoutSec = parseInt(process.env.HOLEHE_SITE_TIMEOUT_SEC || '', 10) || 8;
+        const commandTimeoutMs = parseInt(process.env.HOLEHE_COMMAND_TIMEOUT_MS || '', 10) || 180000;
+        const command = `holehe ${JSON.stringify(email)} --no-color --no-clear -T ${timeoutSec}`;
+
+        const { stdout, stderr } = await execPromise(command, {
+            timeout: commandTimeoutMs,
+            maxBuffer: 5 * 1024 * 1024,
+            env: process.env,
+        });
+
+        const combined = `${stdout || ''}\n${stderr || ''}`;
+        const lines = combined
+            .split('\n')
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0);
+
+        const seen = new Set<string>();
         const sites: { domain: string; status: 'found' | 'not_found' | 'rate_limit' | 'error' }[] = [];
-        
-        for (const platform of PLATFORMS) {
-            try {
-                // Try to check if the email exists on this platform via public APIs
-                // This is a simplified approach - use specific APIs for each platform
-                sites.push({
-                    domain: platform.domain,
-                    status: 'not_found' // Default to not found as we can't verify without proper API
-                });
-            } catch (err) {
-                sites.push({
-                    domain: platform.domain,
-                    status: 'error'
-                });
-            }
+
+        for (const line of lines) {
+            if (!line.startsWith('[')) continue;
+            if (/^\[\s*\d+\s*\//.test(line)) continue;
+            if (/holehe v/i.test(line)) continue;
+            if (/email used|websites checked/i.test(line)) continue;
+
+            const domain = extractServiceName(line);
+            if (!domain || seen.has(domain)) continue;
+
+            seen.add(domain);
+            sites.push({
+                domain,
+                status: statusFromPrefix(line),
+            });
         }
 
         return {
-            raw: `Email verification completed for ${email}`,
-            sites
+            raw: combined.trim(),
+            sites,
         };
-    } catch (err) {
-        console.error('Holehe lookup error:', err);
+    } catch (err: any) {
+        console.error('Holehe lookup error:', err?.message || err);
+
+        if (err?.stdout || err?.stderr) {
+            const combined = `${err.stdout || ''}\n${err.stderr || ''}`;
+            const parsedSites = combined
+                .split('\n')
+                .map((line) => line.trim())
+                .filter((line) => line.startsWith('['))
+                .map((line) => {
+                    const domain = line.replace(/^\[[+\-!*]\]\s*/, '').split(':')[0].trim().toLowerCase().replace(/\s+/g, '_');
+                    return {
+                        domain,
+                        status: statusFromPrefix(line),
+                    };
+                })
+                .filter((site) => !!site.domain);
+
+            if (parsedSites.length > 0) {
+                return {
+                    raw: combined.trim(),
+                    sites: parsedSites,
+                };
+            }
+        }
+
         return null;
     }
 };
