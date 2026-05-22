@@ -13,8 +13,10 @@ interface AuthRequest extends Request {
   user?: any;
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 /**
- * Helper: Check if Kali tool is installed
+ * Check if a Kali/system tool is installed and on PATH
  */
 const toolExists = async (toolName: string): Promise<boolean> => {
   try {
@@ -26,8 +28,45 @@ const toolExists = async (toolName: string): Promise<boolean> => {
 };
 
 /**
- * Sherlock - Username OSINT across social platforms
- * Local Kali Linux tool integration
+ * Normalize a raw platform entry from any sherlock output format into a
+ * consistent shape. Handles JSON file output, stdout JSON blobs, and
+ * line-by-line text output.
+ */
+const normalizeStatus = (item: any): 'found' | 'not_found' | 'rate_limit' | 'error' => {
+  const status = String(item?.status || '').toLowerCase();
+  const message = String(item?.message || item?.detail || item?.output || '').toLowerCase();
+
+  if (status === 'found' || item?.found === true) return 'found';
+  if (status === 'rate_limit' || message.includes('rate limit') || message.includes('429')) return 'rate_limit';
+  if (status === 'error' || item?.error || message.includes('error')) return 'error';
+  return 'not_found';
+};
+
+const normalizePlatform = (item: any) => {
+  const status = normalizeStatus(item);
+  return {
+    platform: item?.platform || item?.site || item?.name || item?.title || 'Unknown Platform',
+    url: item?.url || item?.link || item?.profile || '',
+    status,
+    statusCode: typeof item?.statusCode === 'number'
+      ? item.statusCode
+      : status === 'found' ? 200 : status === 'rate_limit' ? 429 : status === 'error' ? 500 : 404,
+    message: item?.message || item?.detail || item?.note || '',
+  };
+};
+
+// ── Sherlock ──────────────────────────────────────────────────────────────────
+
+/**
+ * Sherlock — Username OSINT across 350+ social platforms.
+ *
+ * FIX: The `--json` flag requires a FILE PATH argument, not a boolean switch.
+ *      We write JSON output to a temp file, parse it, then clean up.
+ *
+ * Priority order:
+ *   1. Local Sherlock → JSON file output  (most complete, 350+ sites)
+ *   2. Local Sherlock → text output parse (fallback if JSON file unreadable)
+ *   3. Direct HTTP HEAD checks            (fallback when Sherlock not installed)
  */
 export const sherlockSearch = async (req: AuthRequest, res: Response) => {
   const { username, caseId } = req.body;
@@ -36,45 +75,26 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
     return res.status(400).json({ message: 'Username required' });
   }
 
-  const cleanUsername = username.trim().substring(0, 50); // Prevent injection
+  // Basic sanitisation — strip shell-special chars, cap length
+  const cleanUsername = username.trim().replace(/[^a-zA-Z0-9_.\-]/g, '').substring(0, 50);
+
+  if (!cleanUsername) {
+    return res.status(400).json({ message: 'Username contains no valid characters' });
+  }
+
+  const results: any = {
+    tool: 'Sherlock',
+    username: cleanUsername,
+    timestamp: new Date(),
+    platforms: [],
+    method: 'Unknown',
+  };
 
   try {
-    const normalizeStatus = (item: any): 'found' | 'not_found' | 'rate_limit' | 'error' => {
-      const status = String(item?.status || '').toLowerCase();
-      const message = String(item?.message || item?.detail || item?.output || '').toLowerCase();
-      if (status === 'found' || item?.found === true) return 'found';
-      if (status === 'rate_limit' || message.includes('rate limit') || message.includes('429')) return 'rate_limit';
-      if (status === 'error' || item?.error || message.includes('error')) return 'error';
-      return 'not_found';
-    };
-
-    const normalizePlatform = (item: any) => {
-      const platformName = item?.platform || item?.site || item?.name || item?.title || 'Unknown Platform';
-      const url = item?.url || item?.link || item?.profile || '';
-      const status = normalizeStatus(item);
-
-      return {
-        platform: platformName,
-        url,
-        status,
-        statusCode: typeof item?.statusCode === 'number' ? item.statusCode : status === 'found' ? 200 : status === 'rate_limit' ? 429 : status === 'error' ? 500 : 404,
-        message: item?.message || item?.detail || item?.note || '',
-      };
-    };
-
-    const results: any = {
-      tool: 'Sherlock',
-      username: cleanUsername,
-      timestamp: new Date(),
-      platforms: [],
-      method: 'Unknown'
-    };
-
-    // Check if sherlock is installed
     const hasSherlock = await toolExists('sherlock');
-    
+
     if (!hasSherlock) {
-      // Fallback: Use web API approach with built-in platform list
+      // ── Fallback: direct HTTP HEAD probes ──────────────────────────────────
       const FALLBACK_PLATFORMS = [
         { name: 'GitHub', pattern: `https://github.com/${cleanUsername}` },
         { name: 'Twitter', pattern: `https://twitter.com/${cleanUsername}` },
@@ -91,154 +111,215 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
         { name: 'Medium', pattern: `https://medium.com/@${cleanUsername}` },
         { name: 'Telegram', pattern: `https://t.me/${cleanUsername}` },
         { name: 'Steam', pattern: `https://steamcommunity.com/id/${cleanUsername}` },
+        { name: 'GitLab', pattern: `https://gitlab.com/${cleanUsername}` },
+        { name: 'HackerNews', pattern: `https://news.ycombinator.com/user?id=${cleanUsername}` },
+        { name: 'Replit', pattern: `https://replit.com/@${cleanUsername}` },
+        { name: 'Codepen', pattern: `https://codepen.io/${cleanUsername}` },
+        { name: 'NPM', pattern: `https://npmjs.com/~${cleanUsername}` },
       ];
 
-      const foundPlatforms: any[] = [];
-      for (const platform of FALLBACK_PLATFORMS) {
-        try {
-          const response = await axios.head(platform.pattern, {
-            timeout: 5000,
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            maxRedirects: 1,
-            validateStatus: (s) => s < 500
-          });
-          
-          if (response.status === 200 || response.status === 301 || response.status === 302) {
-            foundPlatforms.push({
-              platform: platform.name,
-              url: platform.pattern,
-              status: 'found',
-              statusCode: 200,
-              message: 'Profile found'
+      const probeResults = await Promise.allSettled(
+        FALLBACK_PLATFORMS.map(async (p) => {
+          try {
+            const response = await axios.head(p.pattern, {
+              timeout: 5000,
+              headers: { 'User-Agent': 'Mozilla/5.0' },
+              maxRedirects: 2,
+              validateStatus: (s) => s < 500,
             });
+            const found = response.status === 200 || response.status === 301 || response.status === 302;
+            return {
+              platform: p.name,
+              url: p.pattern,
+              status: found ? 'found' : 'not_found',
+              statusCode: response.status,
+              message: found ? 'Profile found' : 'No profile found',
+            };
+          } catch {
+            return {
+              platform: p.name,
+              url: p.pattern,
+              status: 'not_found',
+              statusCode: 404,
+              message: 'No profile found',
+            };
           }
-        } catch (err) {
-          // Platform not found
-        }
-      }
+        })
+      );
 
-      results.platforms = foundPlatforms.length > 0 ? foundPlatforms : FALLBACK_PLATFORMS.map(p => ({
-        platform: p.name,
-        url: p.pattern,
-        status: 'not_found',
-        statusCode: 404,
-        message: 'No profile found'
-      }));
+      results.platforms = probeResults.map((r) =>
+        r.status === 'fulfilled' ? r.value : {
+          platform: 'Unknown',
+          url: '',
+          status: 'error',
+          statusCode: 500,
+          message: 'Probe failed',
+        }
+      );
       results.method = 'API-Fallback';
+
     } else {
-      // Use local Sherlock tool
+      // ── Primary: local Sherlock tool ───────────────────────────────────────
+      //
+      // KEY FIX: --json requires a file path argument.
+      // We write to /tmp, parse the file, then delete it.
+      //
+      const jsonOutputPath = `/tmp/sherlock_${cleanUsername}_${Date.now()}.json`;
+
       try {
-        const { stdout, stderr } = await execPromise(
-          `sherlock "${cleanUsername}" --print-all --json 2>&1`,
-          { maxBuffer: 10 * 1024 * 1024, timeout: 60000 } // 1 min timeout
+        const { stdout } = await execPromise(
+          `sherlock "${cleanUsername}" --print-all --json "${jsonOutputPath}" 2>&1`,
+          { maxBuffer: 10 * 1024 * 1024, timeout: 120000 }
         );
 
         const platformMap = new Map<string, any>();
-        
-        // Try to parse JSON output first
-        try {
-          const jsonMatch = stdout.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const jsonData = JSON.parse(jsonMatch[0]);
-            for (const [platform, data] of Object.entries(jsonData)) {
+
+        // ── Strategy 1: parse the JSON output file ─────────────────────────
+        let parsedFromFile = false;
+        if (fs.existsSync(jsonOutputPath)) {
+          try {
+            const jsonContent = fs.readFileSync(jsonOutputPath, 'utf8');
+            const jsonData = JSON.parse(jsonContent);
+
+            for (const [platformName, data] of Object.entries(jsonData)) {
               if (data && typeof data === 'object') {
                 const item = data as any;
-                const found = item.exists === true || item.found === true;
-                platformMap.set(platform.toLowerCase(), {
-                  platform,
+                // Sherlock JSON: { "status": { "status": "Claimed", ... }, "url_user": "...", ... }
+                const statusObj = item?.status ?? item;
+                const statusStr = String(statusObj?.status ?? '').toLowerCase();
+                const found = statusStr === 'claimed' || statusStr === 'found' || item?.found === true;
+                const rateLimit = statusStr === 'unknown' && String(statusObj?.message ?? '').toLowerCase().includes('429');
+
+                platformMap.set(platformName.toLowerCase(), {
+                  platform: platformName,
                   found,
-                  status: found ? 'found' : 'not_found',
-                  url: item.url || '',
-                  statusCode: found ? 200 : 404,
-                  message: item.message || (found ? 'Profile found' : 'No profile found'),
+                  status: found ? 'found' : rateLimit ? 'rate_limit' : 'not_found',
+                  url: item?.url_user || item?.url || '',
+                  statusCode: found ? 200 : rateLimit ? 429 : 404,
+                  message: statusObj?.message || (found ? 'Profile found' : 'No profile found'),
                 });
               }
             }
+            parsedFromFile = true;
+          } catch (jsonErr) {
+            console.warn('[Sherlock] JSON file parse failed, falling back to stdout parse:', jsonErr);
+          } finally {
+            try { fs.unlinkSync(jsonOutputPath); } catch (_) { /* ignore */ }
           }
-        } catch (jsonErr) {
-          // Fallback to text parsing
+        }
+
+        // ── Strategy 2: parse stdout text lines (fallback) ─────────────────
+        if (!parsedFromFile || platformMap.size === 0) {
           const lines = stdout.split('\n');
           for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed) continue;
 
-            if (/^\[(\+|-|!|\*)\]/.test(trimmed)) {
-              const match = trimmed.match(/^\[([+\-!*])\]\s*(.*?):\s*(.*)$/);
-              if (match && match.length >= 4) {
-                const flag = (match[1] || '').trim();
-                const platform = (match[2] || '').trim();
-                const detail = (match[3] || '').trim();
-                const status = flag === '+' ? 'found' : flag === '!' ? 'rate_limit' : flag === '*' ? 'error' : 'not_found';
-                if (platform) {
-                  platformMap.set(platform.toLowerCase(), {
-                    platform,
-                    found: status === 'found',
-                    status,
-                    url: status === 'found' ? detail : '',
-                    statusCode: status === 'found' ? 200 : status === 'rate_limit' ? 429 : status === 'error' ? 500 : 404,
-                    message: detail,
-                  });
-                }
-              }
+            // Sherlock text format: [+] Platform: https://...
+            //                       [-] Platform: Not Found!
+            //                       [!] Platform: <rate limit message>
+            //                       [*] Platform: <error>
+            const match = trimmed.match(/^\[([+\-!*])\]\s*(.*?):\s*(.*)$/);
+            if (match) {
+              const flag = match[1].trim();
+              const platform = match[2].trim();
+              const detail = match[3].trim();
+              if (!platform) continue;
+
+              const status =
+                flag === '+' ? 'found'
+                  : flag === '!' ? 'rate_limit'
+                    : flag === '*' ? 'error'
+                      : 'not_found';
+
+              platformMap.set(platform.toLowerCase(), {
+                platform,
+                found: status === 'found',
+                status,
+                url: status === 'found' ? detail : '',
+                statusCode: status === 'found' ? 200 : status === 'rate_limit' ? 429 : status === 'error' ? 500 : 404,
+                message: detail,
+              });
             }
           }
         }
 
-        const platforms = Array.from(platformMap.values()).map(normalizePlatform);
-        results.platforms = platforms.length > 0 ? platforms : [];
+        results.platforms = Array.from(platformMap.values()).map(normalizePlatform);
         results.method = 'Local-Sherlock';
 
-        // Clean up any generated files
-        const reportPath = path.join(process.cwd(), `${cleanUsername}.txt`);
-        if (fs.existsSync(reportPath)) {
-          try { fs.unlinkSync(reportPath); } catch (_) { /* ignore */ }
-        }
       } catch (execError: any) {
-        console.error('Sherlock exec error:', execError);
-        // Return empty results instead of error
+        // Exit code 1 from Sherlock just means "some sites not found" — still parse what we have.
+        // Exit code 2 means argument error — surface it clearly.
+        console.error('[Sherlock] exec error:', {
+          code: execError?.code,
+          cmd: execError?.cmd,
+          stdout: execError?.stdout?.substring(0, 500),
+        });
+
+        if (execError?.code === 2) {
+          // Argument parsing error from Sherlock — means our command is wrong
+          results.method = 'Failed';
+          results.error = `Sherlock argument error (code 2). stdout: ${execError?.stdout?.substring(0, 300)}`;
+        } else {
+          results.method = 'Partial';
+          results.error = 'Sherlock execution encountered an issue';
+        }
         results.platforms = [];
-        results.method = 'Failed';
-        results.error = 'Sherlock execution encountered an issue';
+
+        // Clean up JSON file in error path too
+        if (fs.existsSync(jsonOutputPath)) {
+          try { fs.unlinkSync(jsonOutputPath); } catch (_) { /* ignore */ }
+        }
+      }
+
+      // Clean up any .txt report Sherlock may have created in cwd
+      const txtReport = path.join(process.cwd(), `${cleanUsername}.txt`);
+      if (fs.existsSync(txtReport)) {
+        try { fs.unlinkSync(txtReport); } catch (_) { /* ignore */ }
       }
     }
 
+    // ── Logging & persistence ──────────────────────────────────────────────
     logUserActivity(req, 'sherlock_search', 'Sherlock Username Search', { target: cleanUsername });
 
-    // Save finding if caseId provided
     if (caseId) {
       try {
+        const foundCount = results.platforms.filter((p: any) => p.status === 'found').length;
         const finding = new Finding({
           caseId,
           findingType: 'sherlock_search',
           source: 'Sherlock (OSINT)',
           username: cleanUsername,
           data: results,
-          confidence: results.platforms.filter((p: any) => p.status === 'found').length > 0 ? 85 : 20,
+          confidence: foundCount > 0 ? 85 : 20,
           isVerified: false,
           tags: ['sherlock', 'username-search', 'osint'],
         });
         await finding.save();
       } catch (findingError) {
-        console.error('Error saving sherlock finding:', findingError);
+        console.error('[Sherlock] Error saving finding:', findingError);
       }
     }
 
+    // ── Response ───────────────────────────────────────────────────────────
     const foundCount = results.platforms.filter((p: any) => p.status === 'found').length;
-    const totalChecked = results.platforms.length || 0;
-    const successRate = totalChecked > 0 ? `${((foundCount / totalChecked) * 100).toFixed(2)}%` : '0%';
-    
-    res.json({
+    const totalChecked = results.platforms.length;
+
+    return res.json({
       ...results,
       summary: {
         totalPlatformsChecked: totalChecked,
         platformsFound: foundCount,
-        successRate,
-        status: foundCount > 0 ? 'success' : 'no_results'
-      }
+        successRate: totalChecked > 0
+          ? `${((foundCount / totalChecked) * 100).toFixed(2)}%`
+          : '0%',
+        status: foundCount > 0 ? 'success' : 'no_results',
+      },
     });
+
   } catch (error: any) {
-    console.error('Sherlock search error:', error);
-    res.status(200).json({ 
+    console.error('[Sherlock] Unhandled error:', error);
+    return res.status(200).json({
       tool: 'Sherlock',
       username: cleanUsername,
       platforms: [],
@@ -246,15 +327,18 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
         totalPlatformsChecked: 0,
         platformsFound: 0,
         successRate: '0%',
-        status: 'error'
+        status: 'error',
       },
-      error: error.message || 'Sherlock search encountered an error'
+      error: error.message || 'Sherlock search encountered an error',
     });
   }
 };
 
+// ── Sherlock SSE Stream ───────────────────────────────────────────────────────
+
 /**
- * Sherlock Stream - SSE live output for username search
+ * Sherlock Stream — Server-Sent Events live output for username search.
+ * Streams each platform result as it comes in for real-time UI updates.
  */
 export const sherlockStream = async (req: Request, res: Response) => {
   const { username, caseId } = req.query as { username?: string; caseId?: string };
@@ -264,46 +348,48 @@ export const sherlockStream = async (req: Request, res: Response) => {
     return;
   }
 
-  // Set SSE headers
+  const cleanUsername = username.trim().replace(/[^a-zA-Z0-9_.\-]/g, '').substring(0, 50);
+
+  // SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
   const send = (data: object) => {
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
+    if (!res.writableEnded) res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
 
-  send({ type: 'status', message: `[*] Starting username scan for: ${username}` });
+  send({ type: 'status', message: `[*] Starting username scan for: ${cleanUsername}` });
 
   try {
     const hasSherlock = await toolExists('sherlock');
 
     if (!hasSherlock) {
-      // Fallback: simulate scan across known platforms
+      // ── Fallback: probe known platforms one by one (SSE) ──────────────────
       const PLATFORMS = [
-        { name: 'GitHub', url: `https://github.com/${username}` },
-        { name: 'Twitter', url: `https://twitter.com/${username}` },
-        { name: 'Instagram', url: `https://instagram.com/${username}` },
-        { name: 'Reddit', url: `https://reddit.com/user/${username}` },
-        { name: 'LinkedIn', url: `https://linkedin.com/in/${username}` },
-        { name: 'TikTok', url: `https://tiktok.com/@${username}` },
-        { name: 'Pinterest', url: `https://pinterest.com/${username}` },
-        { name: 'Twitch', url: `https://twitch.tv/${username}` },
-        { name: 'YouTube', url: `https://youtube.com/@${username}` },
-        { name: 'DeviantArt', url: `https://deviantart.com/${username}` },
-        { name: 'Keybase', url: `https://keybase.io/${username}` },
-        { name: 'Medium', url: `https://medium.com/@${username}` },
-        { name: 'Telegram', url: `https://t.me/${username}` },
-        { name: 'Steam', url: `https://steamcommunity.com/id/${username}` },
-        { name: 'Fiverr', url: `https://fiverr.com/${username}` },
-        { name: 'Replit', url: `https://replit.com/@${username}` },
-        { name: 'HackerNews', url: `https://news.ycombinator.com/user?id=${username}` },
-        { name: 'GitLab', url: `https://gitlab.com/${username}` },
-        { name: 'Codepen', url: `https://codepen.io/${username}` },
-        { name: 'Flickr', url: `https://flickr.com/people/${username}` },
-        { name: 'Pastebin', url: `https://pastebin.com/u/${username}` },
-        { name: 'NPM', url: `https://npmjs.com/~${username}` },
+        { name: 'GitHub', url: `https://github.com/${cleanUsername}` },
+        { name: 'Twitter', url: `https://twitter.com/${cleanUsername}` },
+        { name: 'Instagram', url: `https://instagram.com/${cleanUsername}` },
+        { name: 'Reddit', url: `https://reddit.com/user/${cleanUsername}` },
+        { name: 'LinkedIn', url: `https://linkedin.com/in/${cleanUsername}` },
+        { name: 'TikTok', url: `https://tiktok.com/@${cleanUsername}` },
+        { name: 'Pinterest', url: `https://pinterest.com/${cleanUsername}` },
+        { name: 'Twitch', url: `https://twitch.tv/${cleanUsername}` },
+        { name: 'YouTube', url: `https://youtube.com/@${cleanUsername}` },
+        { name: 'DeviantArt', url: `https://deviantart.com/${cleanUsername}` },
+        { name: 'Keybase', url: `https://keybase.io/${cleanUsername}` },
+        { name: 'Medium', url: `https://medium.com/@${cleanUsername}` },
+        { name: 'Telegram', url: `https://t.me/${cleanUsername}` },
+        { name: 'Steam', url: `https://steamcommunity.com/id/${cleanUsername}` },
+        { name: 'Fiverr', url: `https://fiverr.com/${cleanUsername}` },
+        { name: 'Replit', url: `https://replit.com/@${cleanUsername}` },
+        { name: 'HackerNews', url: `https://news.ycombinator.com/user?id=${cleanUsername}` },
+        { name: 'GitLab', url: `https://gitlab.com/${cleanUsername}` },
+        { name: 'Codepen', url: `https://codepen.io/${cleanUsername}` },
+        { name: 'Flickr', url: `https://flickr.com/people/${cleanUsername}` },
+        { name: 'Pastebin', url: `https://pastebin.com/u/${cleanUsername}` },
+        { name: 'NPM', url: `https://npmjs.com/~${cleanUsername}` },
       ];
 
       const foundPlatforms: any[] = [];
@@ -316,10 +402,9 @@ export const sherlockStream = async (req: Request, res: Response) => {
             headers: { 'User-Agent': 'Mozilla/5.0' },
             validateStatus: (s) => s < 500,
           });
-          const found = httpResp.status === 200;
-          if (found) {
-            send({ type: 'found', platform: platform.name, url: platform.url, statusCode: httpResp.status });
-            foundPlatforms.push({ platform: platform.name, found: true, url: platform.url, statusCode: httpResp.status });
+          if (httpResp.status === 200) {
+            foundPlatforms.push({ platform: platform.name, found: true, url: platform.url, statusCode: 200 });
+            send({ type: 'found', platform: platform.name, url: platform.url, statusCode: 200 });
           } else {
             send({ type: 'not_found', platform: platform.name });
           }
@@ -328,33 +413,34 @@ export const sherlockStream = async (req: Request, res: Response) => {
         }
       }
 
-      if (caseId) {
+      if (caseId && foundPlatforms.length > 0) {
         try {
-          const finding = new Finding({
+          await new Finding({
             caseId,
             findingType: 'username_search',
             source: 'Username OSINT',
-            username,
-            data: { platforms: foundPlatforms, username },
+            username: cleanUsername,
+            data: { platforms: foundPlatforms, username: cleanUsername },
             confidence: 80,
             isVerified: false,
             tags: ['username-search', 'osint'],
-          });
-          await finding.save();
-        } catch {}
+          }).save();
+        } catch { /* non-fatal */ }
       }
 
       send({ type: 'done', summary: { totalChecked: PLATFORMS.length, found: foundPlatforms.length } });
+
     } else {
-      // Use real sherlock with spawn for live output
-      const { spawn } = await import('child_process');
-      const proc = spawn('sherlock', [username, '--timeout', '10', '--print-found'], { stdio: ['ignore', 'pipe', 'pipe'] });
+      // ── Primary: local Sherlock with live stdout streaming ─────────────────
+      const proc = spawn('sherlock', [cleanUsername, '--timeout', '10', '--print-found'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
       const foundPlatforms: any[] = [];
 
       proc.on('error', (err) => {
-        console.error('[Sherlock Tool] Spawn error:', err);
-        send({ type: 'log', message: `[!] Failed to start Sherlock CLI: ${err.message}` });
-        send({ type: 'error', message: 'Sherlock CLI tools could not be started.' });
+        console.error('[Sherlock Stream] Spawn error:', err);
+        send({ type: 'error', message: `Failed to start Sherlock: ${err.message}` });
       });
 
       proc.stdout.on('data', (chunk: Buffer) => {
@@ -362,8 +448,9 @@ export const sherlockStream = async (req: Request, res: Response) => {
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed) continue;
-          if (trimmed.includes('[+]')) {
-            const match = trimmed.match(/\[\+\]\s(.*?):\s(.*)/);
+
+          if (trimmed.startsWith('[+]')) {
+            const match = trimmed.match(/\[\+\]\s+(.*?):\s+(https?:\/\/\S+)/);
             if (match) {
               const platform = match[1].trim();
               const url = match[2].trim();
@@ -372,6 +459,12 @@ export const sherlockStream = async (req: Request, res: Response) => {
             } else {
               send({ type: 'log', message: trimmed });
             }
+          } else if (trimmed.startsWith('[-]')) {
+            const match = trimmed.match(/\[-\]\s+(.*?):/);
+            if (match) send({ type: 'not_found', platform: match[1].trim() });
+          } else if (trimmed.startsWith('[!]')) {
+            const match = trimmed.match(/\[!\]\s+(.*?):\s*(.*)/);
+            if (match) send({ type: 'rate_limit', platform: match[1].trim(), message: match[2].trim() });
           } else {
             send({ type: 'log', message: trimmed });
           }
@@ -386,16 +479,20 @@ export const sherlockStream = async (req: Request, res: Response) => {
 
       if (caseId && foundPlatforms.length > 0) {
         try {
-          const finding = new Finding({
-            caseId, findingType: 'username_search', source: 'Username OSINT',
-            username, data: { platforms: foundPlatforms, username }, confidence: 90,
-            isVerified: false, tags: ['username-search', 'sherlock'],
-          });
-          await finding.save();
-        } catch {}
+          await new Finding({
+            caseId,
+            findingType: 'username_search',
+            source: 'Username OSINT (Stream)',
+            username: cleanUsername,
+            data: { platforms: foundPlatforms, username: cleanUsername },
+            confidence: 90,
+            isVerified: false,
+            tags: ['username-search', 'sherlock', 'stream'],
+          }).save();
+        } catch { /* non-fatal */ }
       }
 
-      send({ type: 'done', summary: { totalChecked: foundPlatforms.length + 10, found: foundPlatforms.length } });
+      send({ type: 'done', summary: { totalChecked: foundPlatforms.length, found: foundPlatforms.length } });
     }
   } catch (err: any) {
     send({ type: 'error', message: err.message || 'Stream failed' });
@@ -404,8 +501,10 @@ export const sherlockStream = async (req: Request, res: Response) => {
   res.end();
 };
 
+// ── ExifTool ──────────────────────────────────────────────────────────────────
+
 /**
- * ExifTool - Metadata extraction from files
+ * ExifTool — Metadata extraction from uploaded files.
  */
 export const exiftoolMetadata = async (req: AuthRequest, res: Response) => {
   const { caseId } = req.body;
@@ -414,118 +513,108 @@ export const exiftoolMetadata = async (req: AuthRequest, res: Response) => {
     return res.status(400).json({ message: 'File upload required' });
   }
 
-  try {
-    const filePath = req.file.path;
-    const results: any = {
-      tool: 'ExifTool',
-      filename: req.file.originalname,
-      filesize: req.file.size,
-      mimeType: req.file.mimetype,
-      uploadedAt: new Date(),
-      metadata: {},
-      sensitiveData: {
-        gps: null,
-        creator: null,
-        copyright: null,
-        software: null,
-        cameraModel: null,
-        dateTime: null,
-        deviceId: null
-      }
-    };
+  const filePath = req.file.path;
 
+  const results: any = {
+    tool: 'ExifTool',
+    filename: req.file.originalname,
+    filesize: req.file.size,
+    mimeType: req.file.mimetype,
+    uploadedAt: new Date(),
+    metadata: {},
+    sensitiveData: {
+      gps: null,
+      creator: null,
+      copyright: null,
+      software: null,
+      cameraModel: null,
+      dateTime: null,
+      deviceId: null,
+    },
+  };
+
+  try {
     const hasExiftool = await toolExists('exiftool');
 
     if (!hasExiftool) {
-      // Clean up and return error
-      try { fs.unlinkSync(filePath); } catch (_) { }
+      try { fs.unlinkSync(filePath); } catch (_) { /* ignore */ }
       return res.status(200).json({
         ...results,
         method: 'Unavailable',
-        message: 'ExifTool not installed. Install with: apt-get install exiftool'
+        message: 'ExifTool not installed. Install with: apt-get install exiftool',
       });
     }
 
     try {
-      const { stdout } = await execPromise(`exiftool -json "${filePath}" 2>&1`, { maxBuffer: 5 * 1024 * 1024 });
-      
-      try {
-        const metadata = JSON.parse(stdout);
-        results.metadata = metadata[0] || {};
-        results.method = 'ExifTool';
+      const { stdout } = await execPromise(
+        `exiftool -json "${filePath}" 2>&1`,
+        { maxBuffer: 5 * 1024 * 1024 }
+      );
 
-        // Extract sensitive data
-        if (metadata[0]) {
-          const data = metadata[0];
-          results.sensitiveData = {
-            gps: data.GPSLatitude ? {
-              latitude: data.GPSLatitude,
-              longitude: data.GPSLongitude,
-              altitude: data.GPSAltitude
-            } : null,
-            creator: data.Creator || null,
-            copyright: data.Copyright || null,
-            software: data.Software || null,
-            cameraModel: data.Model || null,
-            dateTime: data.DateTime || data.DateTimeOriginal || null,
-            deviceId: data.DeviceID || null
-          };
-        }
-      } catch (parseErr) {
-        results.metadata = { raw: stdout };
-        results.method = 'ExifTool (Raw)';
+      const parsed = JSON.parse(stdout);
+      results.metadata = parsed[0] || {};
+      results.method = 'ExifTool';
+
+      if (parsed[0]) {
+        const d = parsed[0];
+        results.sensitiveData = {
+          gps: d.GPSLatitude
+            ? { latitude: d.GPSLatitude, longitude: d.GPSLongitude, altitude: d.GPSAltitude }
+            : null,
+          creator: d.Creator || null,
+          copyright: d.Copyright || null,
+          software: d.Software || null,
+          cameraModel: d.Model || null,
+          dateTime: d.DateTime || d.DateTimeOriginal || null,
+          deviceId: d.DeviceID || null,
+        };
       }
     } catch (execError: any) {
-      console.error('ExifTool error:', execError);
+      console.error('[ExifTool] exec error:', execError);
       results.method = 'Failed';
       results.error = 'ExifTool extraction failed';
     }
 
-    logUserActivity(req, 'exiftool_metadata', 'ExifTool Metadata Extraction', { 
-      filename: req.file.originalname 
+    logUserActivity(req, 'exiftool_metadata', 'ExifTool Metadata Extraction', {
+      filename: req.file.originalname,
     });
 
-    // Save finding if caseId provided
     if (caseId) {
       try {
-        const finding = new Finding({
+        const hasSensitive = Object.values(results.sensitiveData).some((v) => v !== null);
+        await new Finding({
           caseId,
           findingType: 'metadata_extraction',
           source: 'ExifTool (OSINT)',
           data: results,
-          confidence: Object.values(results.sensitiveData).some(v => v !== null) ? 90 : 40,
+          confidence: hasSensitive ? 90 : 40,
           isVerified: true,
           tags: ['exiftool', 'metadata', req.file.mimetype.split('/')[0]],
-        });
-        await finding.save();
-      } catch (findingError) {
-        console.error('Error saving exiftool finding:', findingError);
+        }).save();
+      } catch (e) {
+        console.error('[ExifTool] Error saving finding:', e);
       }
     }
 
-    // Clean up uploaded file
-    try { fs.unlinkSync(filePath); } catch (_) { }
-
-    res.json({
-      status: 'success',
-      ...results
-    });
+    return res.json({ status: 'success', ...results });
   } catch (error: any) {
-    console.error('ExifTool metadata error:', error);
-    // Clean up
-    try { fs.unlinkSync(req.file!.path); } catch (_) { }
-    
-    res.status(200).json({ 
+    console.error('[ExifTool] Unhandled error:', error);
+    return res.status(200).json({
       message: 'Metadata extraction encountered an issue',
       tool: 'ExifTool',
       status: 'error',
-      error: error.message
+      error: error.message,
     });
+  } finally {
+    // Always clean up the uploaded temp file
+    try { fs.unlinkSync(filePath); } catch (_) { /* ignore */ }
   }
 };
 
+// ── Whois ─────────────────────────────────────────────────────────────────────
+
 /**
- * Whois - Domain and IP ownership information
+ * Whois — Domain and IP ownership information.
  */
 export const whoisLookup = async (req: AuthRequest, res: Response) => {
   const { target, caseId } = req.body;
@@ -536,82 +625,79 @@ export const whoisLookup = async (req: AuthRequest, res: Response) => {
 
   const cleanTarget = target.trim().substring(0, 255);
 
-  try {
-    const results: any = {
-      tool: 'Whois',
-      target: cleanTarget,
-      timestamp: new Date(),
-      data: {},
-      summary: {
-        registrar: null,
-        registrationDate: null,
-        expirationDate: null,
-        nameServers: [],
-        organization: null,
-        address: null,
-        email: null,
-        phone: null
-      }
-    };
+  const results: any = {
+    tool: 'Whois',
+    target: cleanTarget,
+    timestamp: new Date(),
+    data: {},
+    summary: {
+      registrar: null,
+      registrationDate: null,
+      expirationDate: null,
+      nameServers: [],
+      organization: null,
+      address: null,
+      email: null,
+      phone: null,
+    },
+  };
 
+  try {
     const hasWhois = await toolExists('whois');
 
     if (!hasWhois) {
       return res.status(200).json({
         ...results,
         method: 'Unavailable',
-        message: 'Whois tool not installed. Install with: apt-get install whois'
+        message: 'Whois not installed. Install with: apt-get install whois',
       });
     }
 
     try {
-      const { stdout, stderr } = await execPromise(`whois "${cleanTarget}" 2>&1`, { maxBuffer: 5 * 1024 * 1024, timeout: 15000 });
-      const output = stdout || stderr;
-      
-      // Parse Whois output
-      const lines = output.split('\n');
-      const data: any = {};
-      
-      lines.forEach((line: string) => {
-        if (line.includes(':')) {
-          const colonIndex = line.indexOf(':');
-          const key = line.substring(0, colonIndex).trim();
-          const value = line.substring(colonIndex + 1).trim();
-          if (key && value) {
-            data[key] = value;
-          }
+      const { stdout } = await execPromise(
+        `whois "${cleanTarget}" 2>&1`,
+        { maxBuffer: 5 * 1024 * 1024, timeout: 15000 }
+      );
+
+      const data: Record<string, string> = {};
+      for (const line of stdout.split('\n')) {
+        const colonIdx = line.indexOf(':');
+        if (colonIdx === -1) continue;
+        const key = line.substring(0, colonIdx).trim();
+        const value = line.substring(colonIdx + 1).trim();
+        if (key && value && !key.startsWith('%') && !key.startsWith('#')) {
+          data[key] = value;
         }
-      });
+      }
 
       results.data = data;
       results.method = 'Local-Whois';
 
-      // Extract key information
+      const lines = stdout.split('\n');
       results.summary = {
         registrar: data['Registrar'] || data['registrar'] || data['Sponsoring Registrar'] || null,
         registrationDate: data['Creation Date'] || data['created'] || data['Created Date'] || null,
         expirationDate: data['Registry Expiry Date'] || data['expiry_date'] || data['Expiration Date'] || null,
         nameServers: lines
-          .filter((l: string) => l.toLowerCase().includes('name server') || l.toLowerCase().includes('nameserver'))
-          .map((l: string) => l.split(':')[1]?.trim())
-          .filter(Boolean) || [],
+          .filter((l) => /name\s*server/i.test(l))
+          .map((l) => l.split(':')[1]?.trim())
+          .filter(Boolean),
         organization: data['Organization'] || data['organisation'] || data['Org'] || null,
         address: data['Address'] || data['address'] || null,
         email: data['Email'] || data['email'] || data['admin-email'] || null,
-        phone: data['Phone'] || data['phone'] || data['admin-phone'] || null
+        phone: data['Phone'] || data['phone'] || data['admin-phone'] || null,
       };
     } catch (execError: any) {
-      console.error('Whois error:', execError);
+      console.error('[Whois] exec error:', execError);
       results.method = 'Failed';
       results.error = 'Whois lookup failed';
     }
 
     logUserActivity(req, 'whois_lookup', 'Whois Domain/IP Lookup', { target: cleanTarget });
 
-    // Save finding if caseId provided
     if (caseId) {
       try {
-        const finding = new Finding({
+        await new Finding({
           caseId,
           findingType: 'whois_lookup',
           source: 'Whois (OSINT)',
@@ -620,68 +706,65 @@ export const whoisLookup = async (req: AuthRequest, res: Response) => {
           confidence: results.summary.registrar ? 85 : 40,
           isVerified: true,
           tags: ['whois', 'domain-info', 'osint'],
-        });
-        await finding.save();
-      } catch (findingError) {
-        console.error('Error saving whois finding:', findingError);
+        }).save();
+      } catch (e) {
+        console.error('[Whois] Error saving finding:', e);
       }
     }
 
-    res.json({
-      status: 'success',
-      ...results
-    });
+    return res.json({ status: 'success', ...results });
   } catch (error: any) {
-    console.error('Whois lookup error:', error);
-    res.status(200).json({ 
+    console.error('[Whois] Unhandled error:', error);
+    return res.status(200).json({
       tool: 'Whois',
       target: cleanTarget,
       status: 'error',
-      message: error.message || 'Whois lookup encountered an issue'
+      message: error.message || 'Whois lookup encountered an issue',
     });
   }
 };
 
+// ── Nmap (deprecated) ─────────────────────────────────────────────────────────
 
 /**
- * Nmap - Network and port scanning (DEPRECATED & REMOVED)
- * This tool has been removed due to security concerns and reliability issues
+ * @deprecated Removed due to security concerns.
  */
-export const nmapScan = async (req: AuthRequest, res: Response) => {
-  return res.status(410).json({ 
-    message: 'Nmap tool has been deprecated and removed. Use DNS reconnaissance or API-based scanning instead.' 
+export const nmapScan = async (_req: AuthRequest, res: Response) => {
+  return res.status(410).json({
+    message: 'Nmap has been deprecated and removed. Use DNS reconnaissance or API-based scanning instead.',
   });
 };
 
+// ── Tool Availability ─────────────────────────────────────────────────────────
+
 /**
- * System Tool Availability Check
- * Returns which Kali tools are installed and ready to use
+ * Returns which Kali tools are installed and ready to use.
  */
-export const checkToolsAvailability = async (req: Request, res: Response) => {
+export const checkToolsAvailability = async (_req: Request, res: Response) => {
   const tools = ['sherlock', 'exiftool', 'whois', 'dnsrecon', 'recon-ng'];
-  const availability: any = {};
 
   try {
-    for (const tool of tools) {
-      availability[tool] = await toolExists(tool);
-    }
+    const availability: Record<string, boolean> = {};
+    await Promise.all(tools.map(async (t) => { availability[t] = await toolExists(t); }));
 
-    res.json({
+    const installed = Object.values(availability).filter(Boolean).length;
+
+    return res.json({
       status: 'success',
       timestamp: new Date(),
       tools: availability,
-      installed: Object.values(availability).filter(Boolean).length,
+      installed,
       total: tools.length,
-      recommendation: Object.values(availability).filter(Boolean).length < 3 
-        ? 'Install Kali tools for enhanced OSINT capabilities: sudo apt-get install sherlock exiftool whois' 
+      recommendation: installed < 3
+        ? 'Install Kali tools for enhanced OSINT: sudo apt-get install sherlock exiftool whois'
         : 'Major tools are available',
       deprecated: {
-        nmap: 'Removed - use DNS reconnaissance or API-based scanning',
-        theharvester: 'Removed - use email OSINT tools instead'
-      }
+        nmap: 'Removed — use DNS reconnaissance or API-based scanning',
+        theharvester: 'Removed — use email OSINT tools instead',
+      },
     });
   } catch (error) {
-    console.error('Tool availability check error:', error);
-    res.status(500).json({ message: 'Failed to check tool availability' });
+    console.error('[ToolCheck] Error:', error);
+    return res.status(500).json({ message: 'Failed to check tool availability' });
   }
 };
