@@ -244,7 +244,9 @@ export const sherlockSearch = async (req: AuthRequest, res: Response) => {
       const commandTimeoutMs = parseInt(process.env.SHERLOCK_COMMAND_TIMEOUT_MS || '', 10) || 90000;
       let localTimedOut = false;
 
+      // Try the simplest invocation first (some environments have issues with extra flags)
       const sherlockVariants: string[][] = [
+        [cleanUsername],
         [cleanUsername, '--print-all', '--folderoutput', tmpDir, '--no-color', '--timeout', String(perSiteTimeoutSec)],
         [cleanUsername, '--print-all', '--folderoutput', tmpDir, '--timeout', String(perSiteTimeoutSec)],
         [cleanUsername, '--print-found', '--folderoutput', tmpDir, '--no-color', '--timeout', String(perSiteTimeoutSec)],
@@ -554,7 +556,8 @@ export const sherlockStream = async (req: Request, res: Response) => {
     } else {
       // ── Primary: local Sherlock with live stdout streaming ─────────────────
       const siteTimeoutSec = parseInt(process.env.SHERLOCK_SITE_TIMEOUT_SEC || '', 10) || 8;
-      const proc = spawn('sherlock', [cleanUsername, '--timeout', String(siteTimeoutSec), '--print-found', '--no-color'], {
+      // Use the simplest invocation to avoid some environment/network related errors
+      const proc = spawn('sherlock', [cleanUsername], {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 

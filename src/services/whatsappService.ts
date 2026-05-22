@@ -35,21 +35,14 @@ export const fetchWhatsAppProfile = async (cleanPhone: string): Promise<WhatsApp
         const result = response.data;
         if (result && (result.number || result.exists !== undefined || result.phone)) {
             const isBusiness = !!result.isBusiness || !!result.businessProfile;
-            let name = 'N/A';
-            if (result.name) name = result.name;
-            else if (result.businessProfile?.localized_display_name) name = result.businessProfile.localized_display_name;
-            else if (result.verifiedName) name = result.verifiedName;
-
-            let status = 'Active WhatsApp User';
-            if (result.about) status = result.about;
-            else if (result.status) status = result.status;
-            else if (isBusiness) status = 'Verified WhatsApp Business Account';
-
-            const image = result.profilePic || result.urlImage || result.image || "";
+            // Prefer actual display name values; if none present, return null so frontend can show a clearer "hidden" state
+            const name = result.name || result.businessProfile?.localized_display_name || result.verifiedName || null;
+            const status = result.about || result.status || (isBusiness ? 'Verified WhatsApp Business Account' : 'Active WhatsApp User');
+            const image = result.profilePic || result.urlImage || result.image || null;
 
             return {
                 phone: result.phone || `+${cleanPhone}`,
-                name: isBusiness && name === 'N/A' ? 'Verified Business' : (name === 'N/A' ? 'Active WhatsApp User' : name),
+                name,
                 status,
                 image,
                 is_business: isBusiness,

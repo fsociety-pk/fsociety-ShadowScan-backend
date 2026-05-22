@@ -267,6 +267,22 @@ const lookupHolehe = async (email: string): Promise<{ raw: string; sites: { doma
         });
 
         const combined = `${stdout || ''}\n${stderr || ''}`;
+        // Prefer JSON output if holehe returned JSON blob (some versions / forks emit JSON)
+        const maybeJson = parseJsonFromProcessOutput(stdout, stderr);
+        if (maybeJson && (maybeJson.sites || maybeJson.results || Array.isArray(maybeJson))) {
+            // Normalize known JSON shapes
+            const sitesArr: any[] = maybeJson.sites || maybeJson.results || (Array.isArray(maybeJson) ? maybeJson : []);
+            const parsed = sitesArr.map((s: any) => {
+                const domain = (s.domain || s.site || s.service || s.name || '').toString().toLowerCase();
+                const status = /found|used|registered|exists|claimed/i.test(s.status || s.message || '') ? 'found' : 'not_found';
+                return { domain, status };
+            }).filter((s: any) => s.domain);
+
+            if (parsed.length > 0) {
+                return { raw: combined.trim(), sites: parsed };
+            }
+        }
+
         const lines = combined
             .split('\n')
             .map((line) => line.trim())
@@ -276,19 +292,41 @@ const lookupHolehe = async (email: string): Promise<{ raw: string; sites: { doma
         const sites: { domain: string; status: 'found' | 'not_found' | 'rate_limit' | 'error' }[] = [];
 
         for (const line of lines) {
-            if (!line.startsWith('[')) continue;
-            if (/^\[\s*\d+\s*\//.test(line)) continue;
-            if (/holehe v/i.test(line)) continue;
-            if (/email used|websites checked/i.test(line)) continue;
+            // Handle legacy bracketed lines like: [+] github.com: Found
+            if (line.startsWith('[')) {
+                if (/^\[\s*\d+\s*\//.test(line)) continue;
+                if (/holehe v/i.test(line)) continue;
+                if (/email used|websites checked/i.test(line)) continue;
+                const domain = extractServiceName(line);
+                if (!domain || seen.has(domain)) continue;
 
-            const domain = extractServiceName(line);
-            if (!domain || seen.has(domain)) continue;
+                seen.add(domain);
+                sites.push({ domain, status: statusFromPrefix(line) });
+                continue;
+            }
 
-            seen.add(domain);
-            sites.push({
-                domain,
-                status: statusFromPrefix(line),
-            });
+            // Non-bracketed lines may still contain 'domain: status' or 'service - found' formats
+            const colonMatch = line.match(/^(.+?):\s*(https?:\/\/)?([\w.-]+\.[a-z]{2,})(.*)$/i);
+            if (colonMatch) {
+                const domain = colonMatch[3].toLowerCase();
+                if (!seen.has(domain)) {
+                    seen.add(domain);
+                    const status = /found|used|registered|exists/i.test(line) ? 'found' : 'not_found';
+                    sites.push({ domain, status });
+                }
+                continue;
+            }
+
+            // Generic heuristic: extract host-like tokens
+            const hostMatch = line.match(/([a-z0-9][a-z0-9.-]+\.[a-z]{2,})/i);
+            if (hostMatch) {
+                const domain = hostMatch[1].toLowerCase();
+                if (!seen.has(domain)) {
+                    seen.add(domain);
+                    const status = /found|used|registered|exists/i.test(line) ? 'found' : 'not_found';
+                    sites.push({ domain, status });
+                }
+            }
         }
 
         return {
